@@ -28,9 +28,8 @@ pub fn max_hp_rule_op(
     let origin = buff_act::feature_command_origin(feature)?;
     let after_permille = managers
         .buff
-        .active_features(&managers.hp)
+        .active_features_for_owner(&managers.hp, feature.owner_uid)
         .iter()
-        .filter(|active| active.owner_uid == feature.owner_uid)
         .filter_map(hp_permille)
         .sum::<i32>();
     let before_permille = after_permille.saturating_sub(permille.saturating_mul(amount_delta));

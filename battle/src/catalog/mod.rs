@@ -2,6 +2,8 @@ use crate::engine::manager::field::{FieldDefinition, FieldThreshold};
 use crate::engine::mechanic::impromptu::ImpromptuDefinition;
 use crate::engine::round::power::ClothPower;
 use crate::engine::skill::rule::{CommandOrigin, RuleDomain};
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 const BURN_BUFF_FIGHT_CONST: i32 = 29;
 const CONTRACT_OWNER_BUFF_MAP: i32 = 30;
@@ -143,6 +145,32 @@ impl PartialEq for BattleCatalog {
 impl Eq for BattleCatalog {}
 
 impl BattleCatalog {
+    fn cached_character_level(
+        self,
+        hero_id: i32,
+        level: i32,
+    ) -> Option<&'static config::character_level::CharacterLevel> {
+        type Row = config::character_level::CharacterLevel;
+        type Key = (usize, i32, i32);
+        static CACHE: OnceLock<RwLock<HashMap<Key, Option<&'static Row>>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        let key = (
+            self.game_data as *const config::GameDB as usize,
+            hero_id,
+            level,
+        );
+        if let Some(row) = cache.read().unwrap().get(&key).copied() {
+            return row;
+        }
+        let row = self
+            .game_data
+            .character_level
+            .iter()
+            .find(|row| row.hero_id == hero_id && row.level == level);
+        cache.write().unwrap().entry(key).or_insert(row);
+        row
+    }
+
     pub fn new(game_data: &'static config::GameDB) -> Self {
         Self {
             game_data,
@@ -907,10 +935,7 @@ impl BattleCatalog {
         if entity_type != Some(1) {
             return fallback;
         }
-        self.game_data
-            .character_level
-            .iter()
-            .find(|row| row.hero_id == model_id && row.level == level)
+        self.cached_character_level(model_id, level)
             .map(|row| row.technic)
             .unwrap_or(fallback)
     }
@@ -961,12 +986,32 @@ impl BattleCatalog {
         level: Option<i32>,
         entity_type: Option<i32>,
     ) -> EntityExAttributes {
+        type Key = (usize, i32, Option<i32>, Option<i32>);
+        static CACHE: OnceLock<RwLock<HashMap<Key, EntityExAttributes>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        let key = (
+            self.game_data as *const config::GameDB as usize,
+            model_id,
+            level,
+            entity_type,
+        );
+        if let Some(value) = cache.read().unwrap().get(&key).copied() {
+            return value;
+        }
+        let value = self.calculate_entity_ex_attributes(model_id, level, entity_type);
+        cache.write().unwrap().entry(key).or_insert(value);
+        value
+    }
+
+    fn calculate_entity_ex_attributes(
+        self,
+        model_id: i32,
+        level: Option<i32>,
+        entity_type: Option<i32>,
+    ) -> EntityExAttributes {
         if entity_type == Some(1) {
             return self
-                .game_data
-                .character_level
-                .iter()
-                .find(|row| row.hero_id == model_id && row.level == level.unwrap_or_default())
+                .cached_character_level(model_id, level.unwrap_or_default())
                 .map(|row| EntityExAttributes {
                     crit_rate: row.cri,
                     crit_resist: row.recri,

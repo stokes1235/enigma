@@ -90,12 +90,9 @@ pub fn attribute_deltas(
     }
     managers
         .buff
-        .active_features(&managers.hp)
+        .active_features_for_owner(&managers.hp, owner_uid)
         .into_iter()
-        .filter(|feature| {
-            feature.owner_uid == owner_uid
-                && super::is_kind(feature, super::registry::BuffActKind::UseSkillAttrFix)
-        })
+        .filter(|feature| super::is_kind(feature, super::registry::BuffActKind::UseSkillAttrFix))
         .filter_map(|feature| {
             let [_, raw_attr, value] = feature.values.as_slice() else {
                 return None;

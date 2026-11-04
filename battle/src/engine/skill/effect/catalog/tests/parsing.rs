@@ -447,3 +447,35 @@ fn active_skill_filters_share_the_exact_skill_action_driver() {
             && subscription.definition.opcode == 16210
     }));
 }
+
+#[test]
+fn cached_event_lanes_follow_aliases_and_replaced_effects() {
+    init_config();
+    let data = SkillEffectCatalog::from_roots(config::configs::get(), [30864156], []);
+    let effect = data.get(30864156).unwrap().clone();
+    let mut catalog = SkillEffectCatalog::default();
+    catalog.insert(effect.clone());
+    catalog.insert_alias(999_999_999, effect.skill_id);
+    assert!(
+        !catalog
+            .compiled_subscription_lanes(effect.skill_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        catalog.compiled_subscription_lanes(999_999_999).unwrap(),
+        catalog
+            .compiled_subscription_lanes(effect.skill_id)
+            .unwrap()
+    );
+    catalog.insert(ParsedSkillEffect {
+        skill_id: effect.skill_id,
+        slots: Vec::new(),
+    });
+    assert!(
+        catalog
+            .compiled_subscription_lanes(999_999_999)
+            .unwrap()
+            .is_empty()
+    );
+}

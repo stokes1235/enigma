@@ -291,12 +291,7 @@ impl TargetPool {
     ) -> Self {
         let mut pool = self.clone();
         let catalog = pool.catalog();
-        for entities in [
-            &mut pool.attacker_main,
-            &mut pool.attacker_all,
-            &mut pool.defender_main,
-            &mut pool.defender_all,
-        ] {
+        for entities in [&mut pool.attacker_all, &mut pool.defender_all] {
             entities.retain_mut(|entity| {
                 if let Some(identity) =
                     managers
@@ -348,13 +343,14 @@ impl TargetPool {
             .filter_map(|uid| {
                 let lane = managers.entity.roster_lane(uid)?;
                 let team = managers.entity.team_type(uid)?;
+                let current_hp = managers.hp.current(uid);
+                if current_hp <= 0 && included_uid != Some(uid) {
+                    return None;
+                }
                 let mut entity = managers.entity.snapshot(uid).as_ref().and_then(|entity| {
                     TargetEntity::from_fight_entity_with_catalog(catalog, entity)
                 })?;
-                entity.current_hp = managers.hp.current(uid);
-                if entity.current_hp <= 0 && included_uid != Some(uid) {
-                    return None;
-                }
+                entity.current_hp = current_hp;
                 entity.max_hp = managers.hp.max(uid);
                 entity.ex_point = managers.ex_point.get(uid);
                 entity.buffs = managers
@@ -747,33 +743,52 @@ impl TargetEntity {
 impl TargetBuff {
     fn from_buff_info(catalog: crate::catalog::BattleCatalog, buff: &BuffInfo) -> Self {
         let id = buff.buff_id.unwrap_or_default();
-        let features = catalog.buff_feature_tokens(id);
-        Self {
-            id,
-            type_id: buff.r#type.unwrap_or_else(|| catalog.buff_type_id(id)),
-            status: catalog.buff_status(id),
-            source_uid: buff.from_uid.unwrap_or_default(),
-            features: features.clone(),
-            act_kinds: features
-                .iter()
-                .filter_map(|feature| {
-                    let opcode = feature.split('#').next()?.parse().ok()?;
-                    Some(catalog.buff_act_definition(opcode)?.kind)
-                })
-                .collect(),
-            monster_labels: features
-                .iter()
-                .filter_map(|feature| {
-                    let mut values = feature
-                        .split('#')
-                        .filter_map(|value| value.parse::<i32>().ok());
-                    let opcode = values.next()?;
-                    (catalog.buff_act_definition(opcode)?.kind
-                        == crate::engine::skill::buff_act::registry::BuffActKind::MonsterLabel)
-                        .then(|| values.next())?
-                })
-                .collect(),
-        }
+        type Key = (usize, i32);
+        static CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<Key, TargetBuff>>> =
+            std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()));
+        let key = (catalog.game_data() as *const config::GameDB as usize, id);
+        let cached = cache.read().unwrap().get(&key).cloned();
+        let mut template = if let Some(template) = cached {
+            template
+        } else {
+            let features = catalog.buff_feature_tokens(id);
+            let template = Self {
+                id,
+                type_id: catalog.buff_type_id(id),
+                status: catalog.buff_status(id),
+                source_uid: 0,
+                features: features.clone(),
+                act_kinds: features
+                    .iter()
+                    .filter_map(|feature| {
+                        let opcode = feature.split('#').next()?.parse().ok()?;
+                        Some(catalog.buff_act_definition(opcode)?.kind)
+                    })
+                    .collect(),
+                monster_labels: features
+                    .iter()
+                    .filter_map(|feature| {
+                        let mut values = feature
+                            .split('#')
+                            .filter_map(|value| value.parse::<i32>().ok());
+                        let opcode = values.next()?;
+                        (catalog.buff_act_definition(opcode)?.kind
+                            == crate::engine::skill::buff_act::registry::BuffActKind::MonsterLabel)
+                            .then(|| values.next())?
+                    })
+                    .collect(),
+            };
+            cache
+                .write()
+                .unwrap()
+                .entry(key)
+                .or_insert_with(|| template.clone());
+            template
+        };
+        template.type_id = buff.r#type.unwrap_or(template.type_id);
+        template.source_uid = buff.from_uid.unwrap_or_default();
+        template
     }
 
     fn has_buff_act_kind(

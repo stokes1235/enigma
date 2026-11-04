@@ -314,3 +314,66 @@ fn discovers_event_passives_linked_by_active_buffs() {
         }]
     );
 }
+
+#[test]
+fn combined_event_buff_discovery_matches_individual_events() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        attacker: Some(FightTeam {
+            entitys: [10, 11]
+                .into_iter()
+                .map(|uid| FightEntityInfo {
+                    uid: Some(uid),
+                    team_type: Some(1),
+                    current_hp: Some(1),
+                    passive_skill: vec![31100531],
+                    buffs: vec![BuffInfo {
+                        uid: Some(uid + 100),
+                        buff_id: Some(8112651),
+                        from_uid: Some(uid),
+                        count: Some(3),
+                        layer: Some(3),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let catalog = SkillEffectCatalog::from_fight(config::configs::get(), &fight);
+    let pool = TargetPool::from_fight(&fight);
+    let managers = BattleManagers::seeded(&fight);
+    let events = [
+        EventKind::SkillAction,
+        EventKind::SkillCast,
+        EventKind::RoundStart,
+    ];
+    let combined = for_compiled_events(&pool, &managers, &catalog, events).unwrap();
+    let mut expected = Vec::new();
+    for event in events {
+        for buff_act in for_compiled_event(&pool, &managers, &catalog, event)
+            .unwrap()
+            .buff_acts
+        {
+            if !expected.contains(&buff_act) {
+                expected.push(buff_act);
+            }
+        }
+    }
+    assert!(!expected.is_empty());
+    assert_eq!(combined.buff_acts, expected);
+    for owner in [10, 11, 99] {
+        let all = managers
+            .buff
+            .active_features(&managers.hp)
+            .into_iter()
+            .filter(|feature| feature.owner_uid == owner)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            managers.buff.active_features_for_owner(&managers.hp, owner),
+            all
+        );
+    }
+}
