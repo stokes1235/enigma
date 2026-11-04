@@ -1,0 +1,4 @@
+[paths]
+server_root=.
+game_dir=C:\Games\Reverse1999
+log_dir=logs
