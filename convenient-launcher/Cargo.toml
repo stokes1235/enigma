@@ -1,0 +1,10 @@
+[package]
+name = "r1999-launcher"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[profile.release]
+opt-level = 2
+codegen-units = 1
+strip = true
