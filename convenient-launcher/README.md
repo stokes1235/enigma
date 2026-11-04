@@ -4,6 +4,25 @@ Windows 启动器：启动游戏及三个本地服务，关闭游戏后清理本
 
 将程序放在包含 `Server` 和 `Patch` 目录的服务端根目录，复制 `r1999-launcher.ini.example` 为 `r1999-launcher.ini`，并将 `game_dir` 修改为包含 `reverse1999.exe` 的游戏目录。路径可为绝对路径，也可相对于配置文件目录；日志默认写入启动器目录下的 `logs`。
 
+目录结构示例：
+
+```text
+服务端根目录/
+├── Patch/
+│   ├── launcher.exe
+│   └── sonetto.dll
+├── Server/
+│   ├── gameserver.exe
+│   ├── sdkserver.exe
+│   ├── muipserver.exe
+│   ├── config.toml
+│   └── ...
+├── r1999-launcher.exe
+└── r1999-launcher.ini
+```
+
+游戏可以放在其他目录，在 `r1999-launcher.ini` 的 `game_dir` 中填写包含 `reverse1999.exe` 的目录。
+
 使用 `cargo build --release` 编译。需要嵌入请求管理员权限的清单时，安装 Windows SDK，设置 `R1999_EMBED_ELEVATION=1` 和 `R1999_RC`（指向 SDK 的 rc.exe），再编译。可用 `--root`、`--game-dir`、`--log-dir` 覆盖配置。
 
 每次运行会创建独立日志目录；SDK 日志可能包含登录凭据，分享前请检查并遮盖。
