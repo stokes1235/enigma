@@ -35,6 +35,7 @@ mod hero;
 mod player;
 mod reward_query;
 mod room;
+mod rouge;
 mod scene;
 mod summon_query;
 mod task;

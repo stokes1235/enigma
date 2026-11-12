@@ -29,7 +29,7 @@ pub async fn build_fight(
         params,
     )?;
     let roster = load_roster(db, player_id, &plan, fight_group).await?;
-    battle::dungeon::build_fight(
+    let mut built = battle::dungeon::build_fight(
         catalog,
         &roster,
         episode_id,
@@ -37,7 +37,21 @@ pub async fn build_fight(
         fight_group,
         options,
         params,
-    )
+    )?;
+    if config::configs::get()
+        .episode
+        .get(episode_id)
+        .is_some_and(|episode| episode.chapter_id == 2901)
+    {
+        let run = database::db::game::rouge::get_run(db, player_id, 1)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing Rouge run"))?;
+        let team: sonettobuf::RougeTeamInfo = serde_json::from_str(&run.team)?;
+        let start = database::db::game::rouge::get_or_create_start(db, player_id, 1).await?;
+        crate::rouge::flow::apply_talent_attributes(&mut built.fight, &start, &run);
+        crate::rouge::flow::apply_team_life(&mut built.fight, &team)?;
+    }
+    Ok(built)
 }
 
 async fn load_roster(

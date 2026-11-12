@@ -1,5 +1,150 @@
 use super::*;
 
+#[test]
+fn rouge_flow_new_commands_reach_handlers_and_decode_replies() {
+    // Dispatch's debug future needs more stack than the default test thread.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(exercise_rouge_flow_wire());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn exercise_rouge_flow_wire() {
+    let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/excel2json");
+    config::init(data_dir.to_str().unwrap()).unwrap();
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    database::run_migrations(&pool).await.unwrap();
+    let player_id = 979;
+    sqlx::query("INSERT INTO users (id, username, created_at, updated_at) VALUES (?, 'rouge-flow-wire', 0, 0)")
+                .bind(player_id).execute(&pool).await.unwrap();
+    database::db::game::rouge::get_or_create_start(&pool, player_id, 1)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE user_rouge_start SET state = 4, difficulty = 1, style = 1 WHERE user_id = ? AND season = 1")
+                .bind(player_id).execute(&pool).await.unwrap();
+    let mut bag = logic::rouge::bag::RunBag::from_layout("8#8", "").unwrap();
+    let a = bag.add(8150014).unwrap();
+    let b = bag.add(8150014).unwrap();
+    let graph = logic::rouge::map::LayerMap {
+        layer_id: 111,
+        stages: 0,
+        nodes: vec![],
+    };
+    sqlx::query("INSERT INTO user_rouge_run (user_id, season, layer_id, map_type, middle_layer_id, position_index, seed, graph, bag, team_exp, updated_at) VALUES (?, 1, 111, 2, 111, 1, 42, ?, ?, 20, 0)")
+                .bind(player_id).bind(serde_json::to_string(&graph).unwrap()).bind(serde_json::to_string(&bag).unwrap())
+                .execute(&pool).await.unwrap();
+    let state = Box::leak(Box::new(AppState::new(pool, configs::get())));
+    let (outbound, mut packets) = mpsc::channel(128);
+    let mut ctx = ConnectionContext::new(outbound, state);
+    ctx.player = Some(Player::new(player_id, PlayerState::new(player_id, 0)));
+    let requests = [
+        (
+            CmdId::RougeMonsterFixAttrCmd,
+            sonettobuf::RougeMonsterFixAttrRequest { season: Some(1) }.encode_to_vec(),
+        ),
+        (
+            CmdId::ActiveTalentCmd,
+            sonettobuf::ActiveTalentRequest {
+                season: Some(1),
+                index: Some(0),
+            }
+            .encode_to_vec(),
+        ),
+        (
+            CmdId::RougeComposeCmd,
+            sonettobuf::RougeComposeRequest {
+                season: Some(1),
+                compose_id: Some(13),
+                consume_ids: vec![a.uid, b.uid],
+            }
+            .encode_to_vec(),
+        ),
+        (
+            CmdId::RougeEndCmd,
+            sonettobuf::RougeEndRequest { season: Some(1) }.encode_to_vec(),
+        ),
+    ];
+    for (sequence, (cmd, data)) in requests.into_iter().enumerate() {
+        if cmd == CmdId::RougeEndCmd {
+            sqlx::query(
+                "UPDATE user_rouge_run SET terminal_state = 2 WHERE user_id = ? AND season = 1",
+            )
+            .bind(player_id)
+            .execute(state.db)
+            .await
+            .unwrap();
+        }
+        let request = ClientPacket {
+            sequence: sequence as i32 + 1,
+            cmd_id: cmd as i16,
+            up_tag: 45,
+            data,
+        }
+        .encode();
+        dispatch_command(&mut ctx, request).await.unwrap();
+        let mut reply = None;
+        while let Ok(packet) = packets.try_recv() {
+            if let CommandPacket::Reply {
+                cmd_id,
+                body,
+                result_code,
+                up_tag,
+                ..
+            } = packet
+            {
+                assert_eq!(cmd_id, cmd);
+                assert_eq!(result_code, 0);
+                assert_eq!(up_tag, 45);
+                reply = Some(body);
+            }
+        }
+        let body = reply.expect("request must receive a reply");
+        match cmd {
+            CmdId::RougeMonsterFixAttrCmd => assert_eq!(
+                sonettobuf::RougeMonsterFixAttrReply::decode(&*body)
+                    .unwrap()
+                    .fix_hp_rate
+                    .as_deref(),
+                Some("0")
+            ),
+            CmdId::ActiveTalentCmd => assert_eq!(
+                sonettobuf::ActiveTalentReply::decode(&*body)
+                    .unwrap()
+                    .rouge_talent_tree
+                    .unwrap()
+                    .rouge_talent[0]
+                    .is_active,
+                Some(1)
+            ),
+            CmdId::RougeComposeCmd => assert_eq!(
+                sonettobuf::RougeComposeReply::decode(&*body)
+                    .unwrap()
+                    .item
+                    .unwrap()
+                    .item_id,
+                Some(8250015)
+            ),
+            CmdId::RougeEndCmd => {
+                let reply = sonettobuf::RougeEndReply::decode(&*body).unwrap();
+                assert_eq!(reply.rouge_info.unwrap().state, Some(5));
+                assert_eq!(
+                    reply.result_info.unwrap().compose_res2_num_str.as_deref(),
+                    Some("8250015#1")
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[tokio::test]
 async fn settlement_acknowledgements_reach_handlers_and_clear_their_flags() {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

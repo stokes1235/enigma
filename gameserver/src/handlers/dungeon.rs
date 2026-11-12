@@ -318,6 +318,11 @@ pub async fn on_start_dungeon(
         .get(episode_id)
         .ok_or(AppError::InvalidRequest)?;
     let chapter_id = request.chapter_id.unwrap_or(episode_cfg.chapter_id);
+    if chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID
+        && !crate::rouge::fight::can_start(ctx.state.db, player_id, episode_id).await?
+    {
+        return Err(AppError::InvalidRequest);
+    }
     if !dungeon::can_start_episode(ctx.state.db, player_id, chapter_id, episode_id).await? {
         return Err(AppError::InvalidRequest);
     }
@@ -529,6 +534,8 @@ pub async fn on_fight_end_fight(
     });
 
     let mut compose_push = None;
+    let mut rouge_push = None;
+    let mut rouge_map_push = None;
     let mut dungeon_settlement = None;
     let mut refund_settlement = None;
     let mut act128_score_updates = None;
@@ -536,6 +543,7 @@ pub async fn on_fight_end_fight(
     if let Some(active) = active.as_ref() {
         let is_abort = msg.is_abort.unwrap_or(false);
         let compose_handled = tower_compose::matches_battle(active);
+        let rouge_handled = crate::rouge::fight::matches_battle(active);
         let won = active.is_victory();
         let act229_star = if !is_abort && won && active.act229_context.is_some() {
             Some(active.star()?)
@@ -543,7 +551,20 @@ pub async fn on_fight_end_fight(
             None
         };
 
-        if !is_abort
+        if is_abort && rouge_handled {
+            if let Some(fight_id) = active.fight_id {
+                dungeon::finish_fight_instance(ctx.state.db, player_id, fight_id).await?;
+            }
+        } else if !is_abort && rouge_handled {
+            let settlement =
+                crate::rouge::fight::settle_active(ctx.state.db, player_id, active).await?;
+            rouge_push = Some(settlement.result);
+            rouge_map_push = Some(sonettobuf::RougeLayerMapInfoPush {
+                season: Some(1),
+                map: Some(settlement.map),
+            });
+            ctx.player_mut()?.battle.complete_active(None);
+        } else if !is_abort
             && won
             && (compose_handled || (active.tower_type.is_none() && active.act229_context.is_none()))
         {
@@ -601,6 +622,16 @@ pub async fn on_fight_end_fight(
     if let Some(settle) = compose_push {
         ctx.notify(CmdId::TowerComposeFightSettlePushCmd, settle)
             .await?;
+    }
+    if let Some(push) = rouge_push {
+        let won = push.is_win == Some(true);
+        ctx.notify(CmdId::RougeFightResultPushCmd, push).await?;
+        if won {
+            send_rouge_economy(ctx).await?;
+        }
+    }
+    if let Some(push) = rouge_map_push {
+        ctx.notify(CmdId::RougeLayerMapInfoPushCmd, push).await?;
     }
     if let Some((settlement, chapter_id, episode_id)) = dungeon_settlement {
         send_completed_dungeon(ctx, player_id, chapter_id, episode_id, settlement).await?;
@@ -674,7 +705,13 @@ pub async fn on_dungeon_end_dungeon(
     let active = ctx.player()?.battle.active_snapshot();
 
     if let Some(active) = active.as_ref() {
-        if msg.is_abort.unwrap_or(false) {
+        if msg.is_abort.unwrap_or(false) && crate::rouge::fight::matches_battle(active) {
+            if let Some(fight_id) = active.fight_id {
+                dungeon::finish_fight_instance(ctx.state.db, player_id, fight_id).await?;
+            }
+            ctx.player_mut()?.battle.clear_active();
+            push::send_end_fight_push(ctx, dungeon::abort_end_fight(active)).await?;
+        } else if msg.is_abort.unwrap_or(false) {
             let tower_push = tower::abort_finish_push(ctx.state.db, player_id, active).await?;
             let (dungeon_update, end_dungeon) =
                 match dungeon::act128_score_dungeon_updates(ctx.state.db, player_id, active).await?
@@ -695,6 +732,24 @@ pub async fn on_dungeon_end_dungeon(
             ctx.notify(CmdId::DungeonEndDungeonPushCmd, end_dungeon)
                 .await?;
             push::send_end_fight_push(ctx, dungeon::abort_end_fight(active)).await?;
+        } else if crate::rouge::fight::matches_battle(active) {
+            let settlement =
+                crate::rouge::fight::settle_active(ctx.state.db, player_id, active).await?;
+            ctx.player_mut()?.battle.complete_active(None);
+            let won = settlement.result.is_win == Some(true);
+            ctx.notify(CmdId::RougeFightResultPushCmd, settlement.result)
+                .await?;
+            if won {
+                send_rouge_economy(ctx).await?;
+            }
+            ctx.notify(
+                CmdId::RougeLayerMapInfoPushCmd,
+                sonettobuf::RougeLayerMapInfoPush {
+                    season: Some(1),
+                    map: Some(settlement.map),
+                },
+            )
+            .await?;
         } else if active.is_victory() {
             let star = active.star()?;
             let round = active.current_round();
@@ -777,6 +832,41 @@ pub async fn on_cover_dungeon_record(
         },
         0,
         req.up_tag,
+    )
+    .await
+}
+
+async fn send_rouge_economy(ctx: &mut ConnectionContext) -> Result<(), AppError> {
+    let info = ctx
+        .player()?
+        .rouge
+        .original_info(ctx.state.db, 1)
+        .await?
+        .rouge_info
+        .ok_or(AppError::InvalidRequest)?;
+    ctx.notify(
+        CmdId::RougeInfoPushCmd,
+        sonettobuf::RougeInfoPush {
+            rouge_info: Some(info.clone()),
+        },
+    )
+    .await?;
+    ctx.notify(
+        CmdId::RougeUpdateCoinPushCmd,
+        sonettobuf::RougeUpdateCoinPush {
+            season: Some(1),
+            coin: info.coin,
+        },
+    )
+    .await?;
+    ctx.notify(
+        CmdId::RougeUpdateTeamExpAndLevelPushCmd,
+        sonettobuf::RougeUpdateTeamExpAndLevelPush {
+            season: Some(1),
+            team_level: info.team_level,
+            team_exp: info.team_exp,
+            team_size: info.team_size,
+        },
     )
     .await
 }

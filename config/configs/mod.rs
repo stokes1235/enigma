@@ -314,6 +314,8 @@ pub mod resistances_attribute;
 pub mod resistances_const;
 pub mod reward;
 pub mod reward_group;
+pub mod rogue_collection;
+pub mod rogue_collection_backpack;
 pub mod role_activity_task;
 pub mod room_block_color;
 pub mod room_building;
@@ -332,6 +334,87 @@ pub mod rouge2_material;
 pub mod rouge2_outside_const;
 pub mod rouge2_relics;
 pub mod rouge2_reward;
+pub mod rouge_active_skill;
+pub mod rouge_attr;
+pub mod rouge_badge;
+pub mod rouge_choice;
+pub mod rouge_choice_event;
+pub mod rouge_collection_trammels;
+pub mod rouge_collection_unlock;
+pub mod rouge_const;
+pub mod rouge_desc;
+pub mod rouge_difficulty;
+pub mod rouge_displace;
+pub mod rouge_dlc3_const;
+pub mod rouge_dlc_const;
+pub mod rouge_drop;
+pub mod rouge_drop_group;
+pub mod rouge_effect;
+pub mod rouge_enchant;
+pub mod rouge_ending;
+pub mod rouge_entrust;
+pub mod rouge_entrust_desc;
+pub mod rouge_episode_rule;
+pub mod rouge_event;
+pub mod rouge_event_type;
+pub mod rouge_extra_desc;
+pub mod rouge_fight_event;
+pub mod rouge_genius;
+pub mod rouge_genius_branch;
+pub mod rouge_genius_branchlight;
+pub mod rouge_genius_overview;
+pub mod rouge_goods;
+pub mod rouge_illustration_list;
+pub mod rouge_interactive;
+pub mod rouge_item_static_desc;
+pub mod rouge_last_reward;
+pub mod rouge_layer;
+pub mod rouge_layer_difficulty;
+pub mod rouge_layer_rule;
+pub mod rouge_level;
+pub mod rouge_limit;
+pub mod rouge_limit_buff;
+pub mod rouge_limit_group;
+pub mod rouge_limit_unlock;
+pub mod rouge_map_choice;
+pub mod rouge_map_rule;
+pub mod rouge_map_skill;
+pub mod rouge_middle_layer;
+pub mod rouge_monster_rule;
+pub mod rouge_open;
+pub mod rouge_outside_const;
+pub mod rouge_path_select;
+pub mod rouge_piece;
+pub mod rouge_piece_position;
+pub mod rouge_piece_select;
+pub mod rouge_piece_talk;
+pub mod rouge_quality;
+pub mod rouge_random_event;
+pub mod rouge_repair_shop;
+pub mod rouge_repair_shop_price;
+pub mod rouge_result;
+pub mod rouge_reward;
+pub mod rouge_reward_stage;
+pub mod rouge_risk;
+pub mod rouge_season;
+pub mod rouge_shop_event;
+pub mod rouge_short_voice;
+pub mod rouge_short_voice_group;
+pub mod rouge_spcollection_desc;
+pub mod rouge_speaker;
+pub mod rouge_special_trigger;
+pub mod rouge_story_list;
+pub mod rouge_style;
+pub mod rouge_style_talent;
+pub mod rouge_surprise_attack;
+pub mod rouge_synthesis;
+pub mod rouge_tag;
+pub mod rouge_talent;
+pub mod rouge_talent_branch;
+pub mod rouge_talk;
+pub mod rouge_unlock_desc;
+pub mod rouge_unlock_skills;
+pub mod rouge_write_desc;
 pub mod rule;
 pub mod same_currency_exchange;
 pub mod scene_switch;
@@ -739,6 +822,8 @@ pub struct GameDB {
     pub resistances_const: resistances_const::ResistancesConstTable,
     pub reward: reward::RewardTable,
     pub reward_group: reward_group::RewardGroupTable,
+    pub rogue_collection: rogue_collection::RogueCollectionTable,
+    pub rogue_collection_backpack: rogue_collection_backpack::RogueCollectionBackpackTable,
     pub role_activity_task: role_activity_task::RoleActivityTaskTable,
     pub room_block_color: room_block_color::RoomBlockColorTable,
     pub room_building: room_building::RoomBuildingTable,
@@ -757,6 +842,87 @@ pub struct GameDB {
     pub rouge2_outside_const: rouge2_outside_const::Rouge2OutsideConstTable,
     pub rouge2_relics: rouge2_relics::Rouge2RelicsTable,
     pub rouge2_reward: rouge2_reward::Rouge2RewardTable,
+    pub rouge_active_skill: rouge_active_skill::RougeActiveSkillTable,
+    pub rouge_attr: rouge_attr::RougeAttrTable,
+    pub rouge_badge: rouge_badge::RougeBadgeTable,
+    pub rouge_choice: rouge_choice::RougeChoiceTable,
+    pub rouge_choice_event: rouge_choice_event::RougeChoiceEventTable,
+    pub rouge_collection_trammels: rouge_collection_trammels::RougeCollectionTrammelsTable,
+    pub rouge_collection_unlock: rouge_collection_unlock::RougeCollectionUnlockTable,
+    pub rouge_const: rouge_const::RougeConstTable,
+    pub rouge_desc: rouge_desc::RougeDescTable,
+    pub rouge_difficulty: rouge_difficulty::RougeDifficultyTable,
+    pub rouge_displace: rouge_displace::RougeDisplaceTable,
+    pub rouge_dlc3_const: rouge_dlc3_const::RougeDlc3ConstTable,
+    pub rouge_dlc_const: rouge_dlc_const::RougeDlcConstTable,
+    pub rouge_drop: rouge_drop::RougeDropTable,
+    pub rouge_drop_group: rouge_drop_group::RougeDropGroupTable,
+    pub rouge_effect: rouge_effect::RougeEffectTable,
+    pub rouge_enchant: rouge_enchant::RougeEnchantTable,
+    pub rouge_ending: rouge_ending::RougeEndingTable,
+    pub rouge_entrust: rouge_entrust::RougeEntrustTable,
+    pub rouge_entrust_desc: rouge_entrust_desc::RougeEntrustDescTable,
+    pub rouge_episode_rule: rouge_episode_rule::RougeEpisodeRuleTable,
+    pub rouge_event: rouge_event::RougeEventTable,
+    pub rouge_event_type: rouge_event_type::RougeEventTypeTable,
+    pub rouge_extra_desc: rouge_extra_desc::RougeExtraDescTable,
+    pub rouge_fight_event: rouge_fight_event::RougeFightEventTable,
+    pub rouge_genius: rouge_genius::RougeGeniusTable,
+    pub rouge_genius_branch: rouge_genius_branch::RougeGeniusBranchTable,
+    pub rouge_genius_branchlight: rouge_genius_branchlight::RougeGeniusBranchlightTable,
+    pub rouge_genius_overview: rouge_genius_overview::RougeGeniusOverviewTable,
+    pub rouge_goods: rouge_goods::RougeGoodsTable,
+    pub rouge_illustration_list: rouge_illustration_list::RougeIllustrationListTable,
+    pub rouge_interactive: rouge_interactive::RougeInteractiveTable,
+    pub rouge_item_static_desc: rouge_item_static_desc::RougeItemStaticDescTable,
+    pub rouge_last_reward: rouge_last_reward::RougeLastRewardTable,
+    pub rouge_layer: rouge_layer::RougeLayerTable,
+    pub rouge_layer_difficulty: rouge_layer_difficulty::RougeLayerDifficultyTable,
+    pub rouge_layer_rule: rouge_layer_rule::RougeLayerRuleTable,
+    pub rouge_level: rouge_level::RougeLevelTable,
+    pub rouge_limit: rouge_limit::RougeLimitTable,
+    pub rouge_limit_buff: rouge_limit_buff::RougeLimitBuffTable,
+    pub rouge_limit_group: rouge_limit_group::RougeLimitGroupTable,
+    pub rouge_limit_unlock: rouge_limit_unlock::RougeLimitUnlockTable,
+    pub rouge_map_choice: rouge_map_choice::RougeMapChoiceTable,
+    pub rouge_map_rule: rouge_map_rule::RougeMapRuleTable,
+    pub rouge_map_skill: rouge_map_skill::RougeMapSkillTable,
+    pub rouge_middle_layer: rouge_middle_layer::RougeMiddleLayerTable,
+    pub rouge_monster_rule: rouge_monster_rule::RougeMonsterRuleTable,
+    pub rouge_open: rouge_open::RougeOpenTable,
+    pub rouge_outside_const: rouge_outside_const::RougeOutsideConstTable,
+    pub rouge_path_select: rouge_path_select::RougePathSelectTable,
+    pub rouge_piece: rouge_piece::RougePieceTable,
+    pub rouge_piece_position: rouge_piece_position::RougePiecePositionTable,
+    pub rouge_piece_select: rouge_piece_select::RougePieceSelectTable,
+    pub rouge_piece_talk: rouge_piece_talk::RougePieceTalkTable,
+    pub rouge_quality: rouge_quality::RougeQualityTable,
+    pub rouge_random_event: rouge_random_event::RougeRandomEventTable,
+    pub rouge_repair_shop: rouge_repair_shop::RougeRepairShopTable,
+    pub rouge_repair_shop_price: rouge_repair_shop_price::RougeRepairShopPriceTable,
+    pub rouge_result: rouge_result::RougeResultTable,
+    pub rouge_reward: rouge_reward::RougeRewardTable,
+    pub rouge_reward_stage: rouge_reward_stage::RougeRewardStageTable,
+    pub rouge_risk: rouge_risk::RougeRiskTable,
+    pub rouge_season: rouge_season::RougeSeasonTable,
+    pub rouge_shop_event: rouge_shop_event::RougeShopEventTable,
+    pub rouge_short_voice: rouge_short_voice::RougeShortVoiceTable,
+    pub rouge_short_voice_group: rouge_short_voice_group::RougeShortVoiceGroupTable,
+    pub rouge_spcollection_desc: rouge_spcollection_desc::RougeSpcollectionDescTable,
+    pub rouge_speaker: rouge_speaker::RougeSpeakerTable,
+    pub rouge_special_trigger: rouge_special_trigger::RougeSpecialTriggerTable,
+    pub rouge_story_list: rouge_story_list::RougeStoryListTable,
+    pub rouge_style: rouge_style::RougeStyleTable,
+    pub rouge_style_talent: rouge_style_talent::RougeStyleTalentTable,
+    pub rouge_surprise_attack: rouge_surprise_attack::RougeSurpriseAttackTable,
+    pub rouge_synthesis: rouge_synthesis::RougeSynthesisTable,
+    pub rouge_tag: rouge_tag::RougeTagTable,
+    pub rouge_talent: rouge_talent::RougeTalentTable,
+    pub rouge_talent_branch: rouge_talent_branch::RougeTalentBranchTable,
+    pub rouge_talk: rouge_talk::RougeTalkTable,
+    pub rouge_unlock_desc: rouge_unlock_desc::RougeUnlockDescTable,
+    pub rouge_unlock_skills: rouge_unlock_skills::RougeUnlockSkillsTable,
+    pub rouge_write_desc: rouge_write_desc::RougeWriteDescTable,
     pub rule: rule::RuleTable,
     pub same_currency_exchange: same_currency_exchange::SameCurrencyExchangeTable,
     pub scene_switch: scene_switch::SceneSwitchTable,
@@ -1792,6 +1958,12 @@ impl GameDB {
         let reward_group = reward_group::RewardGroupTable::load(
             &format!("{}/reward_group.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load reward_group.json: {}", e))?;
+        let rogue_collection = rogue_collection::RogueCollectionTable::load(
+            &format!("{}/rogue_collection.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rogue_collection.json: {}", e))?;
+        let rogue_collection_backpack = rogue_collection_backpack::RogueCollectionBackpackTable::load(
+            &format!("{}/rogue_collection_backpack.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rogue_collection_backpack.json: {}", e))?;
         let role_activity_task = role_activity_task::RoleActivityTaskTable::load(
             &format!("{}/role_activity_task.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load role_activity_task.json: {}", e))?;
@@ -1846,6 +2018,249 @@ impl GameDB {
         let rouge2_reward = rouge2_reward::Rouge2RewardTable::load(
             &format!("{}/rouge2_reward.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load rouge2_reward.json: {}", e))?;
+        let rouge_active_skill = rouge_active_skill::RougeActiveSkillTable::load(
+            &format!("{}/rouge_active_skill.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_active_skill.json: {}", e))?;
+        let rouge_attr = rouge_attr::RougeAttrTable::load(
+            &format!("{}/rouge_attr.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_attr.json: {}", e))?;
+        let rouge_badge = rouge_badge::RougeBadgeTable::load(
+            &format!("{}/rouge_badge.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_badge.json: {}", e))?;
+        let rouge_choice = rouge_choice::RougeChoiceTable::load(
+            &format!("{}/rouge_choice.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_choice.json: {}", e))?;
+        let rouge_choice_event = rouge_choice_event::RougeChoiceEventTable::load(
+            &format!("{}/rouge_choice_event.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_choice_event.json: {}", e))?;
+        let rouge_collection_trammels = rouge_collection_trammels::RougeCollectionTrammelsTable::load(
+            &format!("{}/rouge_collection_trammels.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_collection_trammels.json: {}", e))?;
+        let rouge_collection_unlock = rouge_collection_unlock::RougeCollectionUnlockTable::load(
+            &format!("{}/rouge_collection_unlock.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_collection_unlock.json: {}", e))?;
+        let rouge_const = rouge_const::RougeConstTable::load(
+            &format!("{}/rouge_const.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_const.json: {}", e))?;
+        let rouge_desc = rouge_desc::RougeDescTable::load(
+            &format!("{}/rouge_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_desc.json: {}", e))?;
+        let rouge_difficulty = rouge_difficulty::RougeDifficultyTable::load(
+            &format!("{}/rouge_difficulty.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_difficulty.json: {}", e))?;
+        let rouge_displace = rouge_displace::RougeDisplaceTable::load(
+            &format!("{}/rouge_displace.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_displace.json: {}", e))?;
+        let rouge_dlc3_const = rouge_dlc3_const::RougeDlc3ConstTable::load(
+            &format!("{}/rouge_dlc3_const.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_dlc3_const.json: {}", e))?;
+        let rouge_dlc_const = rouge_dlc_const::RougeDlcConstTable::load(
+            &format!("{}/rouge_dlc_const.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_dlc_const.json: {}", e))?;
+        let rouge_drop = rouge_drop::RougeDropTable::load(
+            &format!("{}/rouge_drop.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_drop.json: {}", e))?;
+        let rouge_drop_group = rouge_drop_group::RougeDropGroupTable::load(
+            &format!("{}/rouge_drop_group.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_drop_group.json: {}", e))?;
+        let rouge_effect = rouge_effect::RougeEffectTable::load(
+            &format!("{}/rouge_effect.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_effect.json: {}", e))?;
+        let rouge_enchant = rouge_enchant::RougeEnchantTable::load(
+            &format!("{}/rouge_enchant.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_enchant.json: {}", e))?;
+        let rouge_ending = rouge_ending::RougeEndingTable::load(
+            &format!("{}/rouge_ending.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_ending.json: {}", e))?;
+        let rouge_entrust = rouge_entrust::RougeEntrustTable::load(
+            &format!("{}/rouge_entrust.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_entrust.json: {}", e))?;
+        let rouge_entrust_desc = rouge_entrust_desc::RougeEntrustDescTable::load(
+            &format!("{}/rouge_entrust_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_entrust_desc.json: {}", e))?;
+        let rouge_episode_rule = rouge_episode_rule::RougeEpisodeRuleTable::load(
+            &format!("{}/rouge_episode_rule.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_episode_rule.json: {}", e))?;
+        let rouge_event = rouge_event::RougeEventTable::load(
+            &format!("{}/rouge_event.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_event.json: {}", e))?;
+        let rouge_event_type = rouge_event_type::RougeEventTypeTable::load(
+            &format!("{}/rouge_event_type.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_event_type.json: {}", e))?;
+        let rouge_extra_desc = rouge_extra_desc::RougeExtraDescTable::load(
+            &format!("{}/rouge_extra_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_extra_desc.json: {}", e))?;
+        let rouge_fight_event = rouge_fight_event::RougeFightEventTable::load(
+            &format!("{}/rouge_fight_event.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_fight_event.json: {}", e))?;
+        let rouge_genius = rouge_genius::RougeGeniusTable::load(
+            &format!("{}/rouge_genius.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_genius.json: {}", e))?;
+        let rouge_genius_branch = rouge_genius_branch::RougeGeniusBranchTable::load(
+            &format!("{}/rouge_genius_branch.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_genius_branch.json: {}", e))?;
+        let rouge_genius_branchlight = rouge_genius_branchlight::RougeGeniusBranchlightTable::load(
+            &format!("{}/rouge_genius_branchlight.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_genius_branchlight.json: {}", e))?;
+        let rouge_genius_overview = rouge_genius_overview::RougeGeniusOverviewTable::load(
+            &format!("{}/rouge_genius_overview.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_genius_overview.json: {}", e))?;
+        let rouge_goods = rouge_goods::RougeGoodsTable::load(
+            &format!("{}/rouge_goods.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_goods.json: {}", e))?;
+        let rouge_illustration_list = rouge_illustration_list::RougeIllustrationListTable::load(
+            &format!("{}/rouge_illustration_list.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_illustration_list.json: {}", e))?;
+        let rouge_interactive = rouge_interactive::RougeInteractiveTable::load(
+            &format!("{}/rouge_interactive.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_interactive.json: {}", e))?;
+        let rouge_item_static_desc = rouge_item_static_desc::RougeItemStaticDescTable::load(
+            &format!("{}/rouge_item_static_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_item_static_desc.json: {}", e))?;
+        let rouge_last_reward = rouge_last_reward::RougeLastRewardTable::load(
+            &format!("{}/rouge_last_reward.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_last_reward.json: {}", e))?;
+        let rouge_layer = rouge_layer::RougeLayerTable::load(
+            &format!("{}/rouge_layer.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_layer.json: {}", e))?;
+        let rouge_layer_difficulty = rouge_layer_difficulty::RougeLayerDifficultyTable::load(
+            &format!("{}/rouge_layer_difficulty.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_layer_difficulty.json: {}", e))?;
+        let rouge_layer_rule = rouge_layer_rule::RougeLayerRuleTable::load(
+            &format!("{}/rouge_layer_rule.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_layer_rule.json: {}", e))?;
+        let rouge_level = rouge_level::RougeLevelTable::load(
+            &format!("{}/rouge_level.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_level.json: {}", e))?;
+        let rouge_limit = rouge_limit::RougeLimitTable::load(
+            &format!("{}/rouge_limit.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_limit.json: {}", e))?;
+        let rouge_limit_buff = rouge_limit_buff::RougeLimitBuffTable::load(
+            &format!("{}/rouge_limit_buff.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_limit_buff.json: {}", e))?;
+        let rouge_limit_group = rouge_limit_group::RougeLimitGroupTable::load(
+            &format!("{}/rouge_limit_group.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_limit_group.json: {}", e))?;
+        let rouge_limit_unlock = rouge_limit_unlock::RougeLimitUnlockTable::load(
+            &format!("{}/rouge_limit_unlock.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_limit_unlock.json: {}", e))?;
+        let rouge_map_choice = rouge_map_choice::RougeMapChoiceTable::load(
+            &format!("{}/rouge_map_choice.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_map_choice.json: {}", e))?;
+        let rouge_map_rule = rouge_map_rule::RougeMapRuleTable::load(
+            &format!("{}/rouge_map_rule.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_map_rule.json: {}", e))?;
+        let rouge_map_skill = rouge_map_skill::RougeMapSkillTable::load(
+            &format!("{}/rouge_map_skill.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_map_skill.json: {}", e))?;
+        let rouge_middle_layer = rouge_middle_layer::RougeMiddleLayerTable::load(
+            &format!("{}/rouge_middle_layer.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_middle_layer.json: {}", e))?;
+        let rouge_monster_rule = rouge_monster_rule::RougeMonsterRuleTable::load(
+            &format!("{}/rouge_monster_rule.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_monster_rule.json: {}", e))?;
+        let rouge_open = rouge_open::RougeOpenTable::load(
+            &format!("{}/rouge_open.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_open.json: {}", e))?;
+        let rouge_outside_const = rouge_outside_const::RougeOutsideConstTable::load(
+            &format!("{}/rouge_outside_const.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_outside_const.json: {}", e))?;
+        let rouge_path_select = rouge_path_select::RougePathSelectTable::load(
+            &format!("{}/rouge_path_select.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_path_select.json: {}", e))?;
+        let rouge_piece = rouge_piece::RougePieceTable::load(
+            &format!("{}/rouge_piece.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_piece.json: {}", e))?;
+        let rouge_piece_position = rouge_piece_position::RougePiecePositionTable::load(
+            &format!("{}/rouge_piece_position.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_piece_position.json: {}", e))?;
+        let rouge_piece_select = rouge_piece_select::RougePieceSelectTable::load(
+            &format!("{}/rouge_piece_select.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_piece_select.json: {}", e))?;
+        let rouge_piece_talk = rouge_piece_talk::RougePieceTalkTable::load(
+            &format!("{}/rouge_piece_talk.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_piece_talk.json: {}", e))?;
+        let rouge_quality = rouge_quality::RougeQualityTable::load(
+            &format!("{}/rouge_quality.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_quality.json: {}", e))?;
+        let rouge_random_event = rouge_random_event::RougeRandomEventTable::load(
+            &format!("{}/rouge_random_event.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_random_event.json: {}", e))?;
+        let rouge_repair_shop = rouge_repair_shop::RougeRepairShopTable::load(
+            &format!("{}/rouge_repair_shop.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_repair_shop.json: {}", e))?;
+        let rouge_repair_shop_price = rouge_repair_shop_price::RougeRepairShopPriceTable::load(
+            &format!("{}/rouge_repair_shop_price.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_repair_shop_price.json: {}", e))?;
+        let rouge_result = rouge_result::RougeResultTable::load(
+            &format!("{}/rouge_result.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_result.json: {}", e))?;
+        let rouge_reward = rouge_reward::RougeRewardTable::load(
+            &format!("{}/rouge_reward.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_reward.json: {}", e))?;
+        let rouge_reward_stage = rouge_reward_stage::RougeRewardStageTable::load(
+            &format!("{}/rouge_reward_stage.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_reward_stage.json: {}", e))?;
+        let rouge_risk = rouge_risk::RougeRiskTable::load(
+            &format!("{}/rouge_risk.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_risk.json: {}", e))?;
+        let rouge_season = rouge_season::RougeSeasonTable::load(
+            &format!("{}/rouge_season.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_season.json: {}", e))?;
+        let rouge_shop_event = rouge_shop_event::RougeShopEventTable::load(
+            &format!("{}/rouge_shop_event.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_shop_event.json: {}", e))?;
+        let rouge_short_voice = rouge_short_voice::RougeShortVoiceTable::load(
+            &format!("{}/rouge_short_voice.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_short_voice.json: {}", e))?;
+        let rouge_short_voice_group = rouge_short_voice_group::RougeShortVoiceGroupTable::load(
+            &format!("{}/rouge_short_voice_group.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_short_voice_group.json: {}", e))?;
+        let rouge_spcollection_desc = rouge_spcollection_desc::RougeSpcollectionDescTable::load(
+            &format!("{}/rouge_spcollection_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_spcollection_desc.json: {}", e))?;
+        let rouge_speaker = rouge_speaker::RougeSpeakerTable::load(
+            &format!("{}/rouge_speaker.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_speaker.json: {}", e))?;
+        let rouge_special_trigger = rouge_special_trigger::RougeSpecialTriggerTable::load(
+            &format!("{}/rouge_special_trigger.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_special_trigger.json: {}", e))?;
+        let rouge_story_list = rouge_story_list::RougeStoryListTable::load(
+            &format!("{}/rouge_story_list.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_story_list.json: {}", e))?;
+        let rouge_style = rouge_style::RougeStyleTable::load(
+            &format!("{}/rouge_style.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_style.json: {}", e))?;
+        let rouge_style_talent = rouge_style_talent::RougeStyleTalentTable::load(
+            &format!("{}/rouge_style_talent.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_style_talent.json: {}", e))?;
+        let rouge_surprise_attack = rouge_surprise_attack::RougeSurpriseAttackTable::load(
+            &format!("{}/rouge_surprise_attack.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_surprise_attack.json: {}", e))?;
+        let rouge_synthesis = rouge_synthesis::RougeSynthesisTable::load(
+            &format!("{}/rouge_synthesis.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_synthesis.json: {}", e))?;
+        let rouge_tag = rouge_tag::RougeTagTable::load(
+            &format!("{}/rouge_tag.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_tag.json: {}", e))?;
+        let rouge_talent = rouge_talent::RougeTalentTable::load(
+            &format!("{}/rouge_talent.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_talent.json: {}", e))?;
+        let rouge_talent_branch = rouge_talent_branch::RougeTalentBranchTable::load(
+            &format!("{}/rouge_talent_branch.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_talent_branch.json: {}", e))?;
+        let rouge_talk = rouge_talk::RougeTalkTable::load(
+            &format!("{}/rouge_talk.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_talk.json: {}", e))?;
+        let rouge_unlock_desc = rouge_unlock_desc::RougeUnlockDescTable::load(
+            &format!("{}/rouge_unlock_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_unlock_desc.json: {}", e))?;
+        let rouge_unlock_skills = rouge_unlock_skills::RougeUnlockSkillsTable::load(
+            &format!("{}/rouge_unlock_skills.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_unlock_skills.json: {}", e))?;
+        let rouge_write_desc = rouge_write_desc::RougeWriteDescTable::load(
+            &format!("{}/rouge_write_desc.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load rouge_write_desc.json: {}", e))?;
         let rule = rule::RuleTable::load(
             &format!("{}/rule.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load rule.json: {}", e))?;
@@ -2429,6 +2844,8 @@ impl GameDB {
             resistances_const,
             reward,
             reward_group,
+            rogue_collection,
+            rogue_collection_backpack,
             role_activity_task,
             room_block_color,
             room_building,
@@ -2447,6 +2864,87 @@ impl GameDB {
             rouge2_outside_const,
             rouge2_relics,
             rouge2_reward,
+            rouge_active_skill,
+            rouge_attr,
+            rouge_badge,
+            rouge_choice,
+            rouge_choice_event,
+            rouge_collection_trammels,
+            rouge_collection_unlock,
+            rouge_const,
+            rouge_desc,
+            rouge_difficulty,
+            rouge_displace,
+            rouge_dlc3_const,
+            rouge_dlc_const,
+            rouge_drop,
+            rouge_drop_group,
+            rouge_effect,
+            rouge_enchant,
+            rouge_ending,
+            rouge_entrust,
+            rouge_entrust_desc,
+            rouge_episode_rule,
+            rouge_event,
+            rouge_event_type,
+            rouge_extra_desc,
+            rouge_fight_event,
+            rouge_genius,
+            rouge_genius_branch,
+            rouge_genius_branchlight,
+            rouge_genius_overview,
+            rouge_goods,
+            rouge_illustration_list,
+            rouge_interactive,
+            rouge_item_static_desc,
+            rouge_last_reward,
+            rouge_layer,
+            rouge_layer_difficulty,
+            rouge_layer_rule,
+            rouge_level,
+            rouge_limit,
+            rouge_limit_buff,
+            rouge_limit_group,
+            rouge_limit_unlock,
+            rouge_map_choice,
+            rouge_map_rule,
+            rouge_map_skill,
+            rouge_middle_layer,
+            rouge_monster_rule,
+            rouge_open,
+            rouge_outside_const,
+            rouge_path_select,
+            rouge_piece,
+            rouge_piece_position,
+            rouge_piece_select,
+            rouge_piece_talk,
+            rouge_quality,
+            rouge_random_event,
+            rouge_repair_shop,
+            rouge_repair_shop_price,
+            rouge_result,
+            rouge_reward,
+            rouge_reward_stage,
+            rouge_risk,
+            rouge_season,
+            rouge_shop_event,
+            rouge_short_voice,
+            rouge_short_voice_group,
+            rouge_spcollection_desc,
+            rouge_speaker,
+            rouge_special_trigger,
+            rouge_story_list,
+            rouge_style,
+            rouge_style_talent,
+            rouge_surprise_attack,
+            rouge_synthesis,
+            rouge_tag,
+            rouge_talent,
+            rouge_talent_branch,
+            rouge_talk,
+            rouge_unlock_desc,
+            rouge_unlock_skills,
+            rouge_write_desc,
             rule,
             same_currency_exchange,
             scene_switch,

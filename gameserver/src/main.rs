@@ -4,6 +4,7 @@ mod gm;
 mod handlers;
 mod net;
 mod player;
+mod rouge;
 mod session;
 mod tower;
 mod tower_compose;

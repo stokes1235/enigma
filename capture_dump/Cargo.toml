@@ -1,0 +1,15 @@
+[package]
+name = "capture_dump"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+protocol = { path = "../protocol" }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "capture_dump"
+path = "src/main.rs"
