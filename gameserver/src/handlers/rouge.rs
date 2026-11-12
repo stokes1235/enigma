@@ -423,6 +423,7 @@ pub async fn on_rouge_select_heal(
         },
     )
     .await?;
+    notify_run_resources(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeSelectHealCmd,
         RougeSelectHealReply {
@@ -475,6 +476,7 @@ pub async fn on_rouge_select_lost_collection(
         )
         .await?;
     }
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeSelectLostCollectionCmd,
         RougeSelectLostCollectionReply { map: Some(map) },
@@ -490,42 +492,11 @@ pub async fn on_rouge_select_drop(
 ) -> Result<(), AppError> {
     let msg = RougeSelectDropRequest::decode(&req.data[..])?;
     let season = msg.season.ok_or(AppError::InvalidRequest)?;
-    let player_id = ctx.player()?.id;
-    let is_battle = database::db::game::rouge::get_run(ctx.state.db, player_id, season)
-        .await?
-        .is_some_and(|run| !run.battle_interactive.is_empty());
     let (map, collection_id, items, layouts) = ctx
         .player()?
         .rouge
         .select_drop(ctx.state.db, season, &msg.collection_pos)
         .await?;
-    if is_battle {
-        let info = ctx
-            .player()?
-            .rouge
-            .original_info(ctx.state.db, season)
-            .await?
-            .rouge_info
-            .ok_or(AppError::InvalidRequest)?;
-        ctx.notify(
-            CmdId::RougeUpdateCoinPushCmd,
-            RougeUpdateCoinPush {
-                season: Some(season),
-                coin: info.coin,
-            },
-        )
-        .await?;
-        ctx.notify(
-            CmdId::RougeUpdateTeamExpAndLevelPushCmd,
-            RougeUpdateTeamExpAndLevelPush {
-                season: Some(season),
-                team_level: info.team_level,
-                team_exp: info.team_exp,
-                team_size: info.team_size,
-            },
-        )
-        .await?;
-    }
     if !items.is_empty() {
         ctx.notify(
             CmdId::RougeAddItemWarehousePushCmd,
@@ -548,6 +519,7 @@ pub async fn on_rouge_select_drop(
         )
         .await?;
     }
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeRougeSelectDropCmd,
         RougeSelectDropReply {
@@ -709,7 +681,7 @@ pub async fn on_rouge_recruit_hero(
         .rouge
         .recruit_heroes(ctx.state.db, season, &msg.hero_ids)
         .await?;
-    notify_run_resources(ctx, season).await?;
+    notify_full_run(ctx, season).await?;
     ctx.notify(
         CmdId::RougeLayerMapInfoPushCmd,
         RougeLayerMapInfoPush {
@@ -756,6 +728,7 @@ pub async fn on_rouge_select_revive(
         },
     )
     .await?;
+    notify_run_resources(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeSelectReviveCmd,
         RougeSelectReviveReply {
@@ -807,6 +780,7 @@ pub async fn on_rouge_add_to_bar(
         },
     )
     .await?;
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeAddToBarCmd,
         RougeAddToBarReply {
@@ -849,6 +823,7 @@ pub async fn on_rouge_remove_from_bar(
         },
     )
     .await?;
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeRemoveFromBarCmd,
         RougeRemoveFromBarReply {
@@ -896,6 +871,7 @@ pub async fn on_rouge_one_key_add_to_bar(
         )
         .await?;
     }
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeOneKeyAddToBarCmd,
         RougeOneKeyAddToBarReply {
@@ -940,6 +916,7 @@ pub async fn on_rouge_one_key_remove_from_bar(
         )
         .await?;
     }
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeOneKeyRemoveFromBarCmd,
         RougeOneKeyRemoveFromBarReply {
@@ -1000,6 +977,7 @@ pub async fn on_rouge_inlay(
         )
         .await?;
     }
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeInlayCmd,
         RougeInlayReply {
@@ -1039,6 +1017,7 @@ pub async fn on_rouge_demount(
         },
     )
     .await?;
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeDemountCmd,
         RougeDemountReply {
@@ -1124,6 +1103,7 @@ pub async fn on_rouge_buy_goods(
         )
         .await?;
     }
+    notify_run_resources(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeBuyGoodsCmd,
         RougeBuyGoodsReply { map: Some(map) },
@@ -1150,6 +1130,7 @@ pub async fn on_rouge_end_shop_event(
             msg.event_id.ok_or(AppError::InvalidRequest)?,
         )
         .await?;
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeEndShopEventCmd,
         RougeEndShopEventReply { map: Some(map) },

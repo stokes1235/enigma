@@ -378,6 +378,9 @@ pub async fn on_start_dungeon(
     ctx.player_mut()?.battle.start_active(active);
 
     push::send_cost_pushes(ctx, player_id, cost.item_ids, cost.currency_ids).await?;
+    if chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID {
+        send_rouge_economy(ctx).await?;
+    }
     send_active_battle_start(ctx, req.up_tag).await
 }
 
@@ -856,6 +859,15 @@ async fn send_rouge_economy(ctx: &mut ConnectionContext) -> Result<(), AppError>
         sonettobuf::RougeUpdateCoinPush {
             season: Some(1),
             coin: info.coin,
+        },
+    )
+    .await?;
+    ctx.notify(
+        CmdId::RougeUpdatePowerPushCmd,
+        sonettobuf::RougeUpdatePowerPush {
+            season: Some(1),
+            power: info.power,
+            power_limit: info.power_limit,
         },
     )
     .await?;

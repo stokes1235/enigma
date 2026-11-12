@@ -422,9 +422,25 @@ pub async fn settle_run(
     add_point: i32,
     rouge_info: &str,
     result_info: &str,
+    expected_extra_balance: i32,
+    extra_add_point: i32,
+    expected_run_seed: i64,
+    expected_terminal_state: i32,
 ) -> Result<bool> {
     let now = common::time::ServerTime::now_ms();
     let mut tx = pool.begin().await?;
+    if !super::rouge_extra::consume_in_transaction(
+        &mut tx,
+        user_id,
+        season,
+        expected_extra_balance,
+        extra_add_point,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     for id in completed_entrusts {
         sqlx::query("INSERT INTO user_rouge_entrust_history (user_id, season, entrust_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
             .bind(user_id).bind(season).bind(id).execute(&mut *tx).await?;
@@ -462,8 +478,8 @@ pub async fn settle_run(
          WHERE user_id = ? AND season = ?",
     )
     .bind(add_genius_point)
-    .bind(add_point)
-    .bind(add_point)
+    .bind(add_point.saturating_add(extra_add_point))
+    .bind(add_point.saturating_add(extra_add_point))
     .bind(now)
     .bind(user_id)
     .bind(season)
@@ -483,9 +499,11 @@ pub async fn settle_run(
     .bind(season)
     .execute(&mut *tx)
     .await?;
-    let run = sqlx::query("DELETE FROM user_rouge_run WHERE user_id = ? AND season = ?")
+    let run = sqlx::query("DELETE FROM user_rouge_run WHERE user_id = ? AND season = ? AND seed = ? AND terminal_state = ? AND terminal_state IN (1,2)")
         .bind(user_id)
         .bind(season)
+        .bind(expected_run_seed)
+        .bind(expected_terminal_state)
         .execute(&mut *tx)
         .await?;
     if start.rows_affected() != 1 || run.rows_affected() != 1 {
@@ -675,6 +693,7 @@ pub async fn advance_run_layer(
     pool: &SqlitePool,
     user_id: i64,
     season: i32,
+    expected: &RougeRun,
     position: &RougeRunPosition,
     graph: &str,
     minor_count: i32,
@@ -691,7 +710,8 @@ pub async fn advance_run_layer(
              minor_count = minor_count + ?,
              danger_count = danger_count + ?, crisis_count = crisis_count + ?,
              step_count = step_count + ?, updated_at = ?
-         WHERE user_id = ? AND season = ?",
+         WHERE user_id = ? AND season = ? AND seed = ? AND layer_id = ?
+           AND layer_index = ? AND map_type = 2 AND terminal_state = 0",
     )
     .bind(position.map_type)
     .bind(position.layer_index)
@@ -708,6 +728,9 @@ pub async fn advance_run_layer(
     .bind(now)
     .bind(user_id)
     .bind(season)
+    .bind(expected.seed)
+    .bind(expected.layer_id)
+    .bind(expected.layer_index)
     .execute(pool)
     .await?;
 

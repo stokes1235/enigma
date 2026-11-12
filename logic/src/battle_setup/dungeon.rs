@@ -48,7 +48,24 @@ pub async fn build_fight(
             .ok_or_else(|| anyhow::anyhow!("missing Rouge run"))?;
         let team: sonettobuf::RougeTeamInfo = serde_json::from_str(&run.team)?;
         let start = database::db::game::rouge::get_or_create_start(db, player_id, 1).await?;
-        crate::rouge::flow::apply_talent_attributes(&mut built.fight, &start, &run);
+        let mut rates = crate::rouge::flow::attribute_rates(&start, &run);
+        let bag: crate::rouge::bag::RunBag = serde_json::from_str(&run.bag)?;
+        let effects =
+            crate::rouge::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin);
+        for (id, value) in &effects.attribute_rates {
+            *rates.entry(*id).or_default() += value;
+        }
+        let unsupported = crate::rouge::combat::apply(
+            &mut built.fight,
+            &mut built.ex_attributes,
+            &mut built.sp_attributes,
+            &rates,
+            &effects.slot_attribute_rates,
+            &team,
+        );
+        if !unsupported.is_empty() {
+            tracing::debug!(?unsupported, "unsupported Rouge numeric attribute fields");
+        }
         crate::rouge::flow::apply_team_life(&mut built.fight, &team)?;
     }
     Ok(built)

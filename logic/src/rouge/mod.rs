@@ -1,7 +1,16 @@
+pub mod artifact_payload;
+pub mod artifact_rules;
 pub mod bag;
+#[cfg(test)]
+mod bonuses_integration;
 mod collection_shapes;
+pub mod combat;
 mod entrust_effects;
+pub mod extra_rewards;
+#[cfg(test)]
+mod extra_rewards_integration;
 pub mod flow;
+pub mod genius_bonuses;
 pub mod map;
 pub mod middle;
 pub mod shop;
@@ -39,12 +48,36 @@ impl RougeManager {
     ) -> Result<GetRougeInfoReply, AppError> {
         let start = load_original(db, self.player_id, season).await?;
         let run = match rouge::get_run(db, self.player_id, season).await? {
-            Some(run) => Some(flow::resume(db, run).await?),
+            Some(mut run) => {
+                let mut detail = flow::details(&run);
+                if detail.outside_genius.is_none() || detail.safe_zone_recovery.is_none() {
+                    let expected = run.clone();
+                    if detail.outside_genius.is_none() {
+                        detail.outside_genius =
+                            Some(rouge::list_genius(db, self.player_id, season).await?);
+                    }
+                    detail.safe_zone_recovery = config::configs::get()
+                        .rouge_style(season, start.style)
+                        .map(|style| style.power);
+                    run.details = serde_json::to_string(&detail)?;
+                    flow::save(db, &expected, &run).await?;
+                }
+                Some(flow::resume(db, run).await?)
+            }
             None => None,
         };
         let init_hero_ids = json_ids(&start.hero_ids);
+        let mut info = rouge_info_from(&start, run.as_ref());
+        if run.is_none() && start.style > 0 {
+            let bonus = genius_bonuses::from_ids(
+                config::configs::get(),
+                &rouge::list_genius(db, self.player_id, season).await?,
+            );
+            info.team_size = info.team_size.map(|value| value + bonus.initial_capacity);
+            info.coin = info.coin.map(|value| value + bonus.initial_coin);
+        }
         Ok(GetRougeInfoReply {
-            rouge_info: Some(rouge_info_from(&start, run.as_ref())),
+            rouge_info: Some(info),
             init_hero_ids,
         })
     }
@@ -139,7 +172,14 @@ impl RougeManager {
             return Err(AppError::InvalidRequest);
         }
         let start = load_original(db, self.player_id, season).await?;
-        Ok(rouge_info_from(&start, None))
+        let mut info = rouge_info_from(&start, None);
+        let bonus = genius_bonuses::from_ids(
+            tables,
+            &rouge::list_genius(db, self.player_id, season).await?,
+        );
+        info.team_size = info.team_size.map(|value| value + bonus.initial_capacity);
+        info.coin = info.coin.map(|value| value + bonus.initial_coin);
+        Ok(info)
     }
 
     /// Initial companion selection, enforcing the noise budget and team size limits.
@@ -184,7 +224,11 @@ impl RougeManager {
             };
             noise += cost;
         }
-        if noise > catalyst.capacity {
+        let bonus = genius_bonuses::from_ids(
+            tables,
+            &rouge::list_genius(db, self.player_id, season).await?,
+        );
+        if noise > catalyst.capacity + bonus.initial_capacity {
             return Err(AppError::InvalidRequest);
         }
 
@@ -277,6 +321,42 @@ impl RougeManager {
             });
         }
         normalized.sort_by_key(|hero| hero.index.unwrap_or_default());
+        let tables = config::configs::get();
+        let half_support = tables
+            .rouge_style(season, start.style)
+            .is_some_and(|style| style.half_cost == 1);
+        let mut noise = 0_i32;
+        for hero in &normalized {
+            for (id, support) in [
+                (hero.hero_id.unwrap_or_default(), false),
+                (hero.support_hero_id.unwrap_or_default(), true),
+            ] {
+                if id == 0 {
+                    continue;
+                }
+                let rare = tables
+                    .rouge_character(id)
+                    .ok_or(AppError::InvalidRequest)?
+                    .rare;
+                let cost = if support && half_support {
+                    tables.rouge_const.get(9).and_then(|row| {
+                        row.value.split('|').find_map(|pair| {
+                            let (key, value) = pair.split_once('#')?;
+                            (key.parse::<i32>().ok() == Some(rare))
+                                .then(|| value.parse::<i32>().ok())
+                                .flatten()
+                        })
+                    })
+                } else {
+                    tables.rouge_noise_cost(rare)
+                }
+                .ok_or(AppError::InvalidRequest)?;
+                noise = noise.saturating_add(cost);
+            }
+        }
+        if noise > flow::team_capacity(&start, &run) {
+            return Err(AppError::InvalidRequest);
+        }
 
         let mut team =
             persisted_team(&run).unwrap_or_else(|| initial_team(&json_ids(&start.hero_ids)));
@@ -326,6 +406,7 @@ impl RougeManager {
         next.battle_interactive.clear();
         let tables = config::configs::get();
         let mut detail = flow::details(&run);
+        detail.battle_reward = None;
         let start = load_original(db, self.player_id, season).await?;
         if target.node_type == map::NODE_SHOP {
             next.shop = serde_json::to_string(&shop::generate(
@@ -344,16 +425,8 @@ impl RougeManager {
                 }
             }
         }
-        let bag: bag::RunBag = serde_json::from_str(&run.bag)?;
-        if bag
-            .items
-            .iter()
-            .any(|item| item.item_id == 8230024 && bag::RunBag::is_placed(item))
-        {
-            next.power = next.power.saturating_add(5).min(next.power_limit);
-            flow::heal_all(&mut next, 200)?;
-        }
         next.details = serde_json::to_string(&detail)?;
+        flow::apply_map_effects(&mut next, artifact_rules::MapTrigger::Step)?;
         next.middle_state = updated_entrust(
             &run,
             EntrustChange {
@@ -579,6 +652,7 @@ impl RougeManager {
             db,
             self.player_id,
             season,
+            &run,
             &position,
             &graph,
             stats.minor,
@@ -680,7 +754,7 @@ impl RougeManager {
                 .rouge_goods
                 .get(goods_id)
                 .ok_or(AppError::InvalidRequest)?;
-            total += goods.price;
+            total += flow::shop_price(&run, goods.price);
             picks.push((index, goods.creator));
         }
         if run.coin < total {
@@ -938,7 +1012,7 @@ impl RougeManager {
         let collection_counts = flow::collection_counts(&run_bag);
         let collection_num = collection_counts.values().sum::<i32>();
         let details = flow::details(&run);
-        let layers = run.layer_index + 1;
+        let layers = flow::completed_layers(&run);
         let cleared = run.terminal_state == 1;
 
         let minor_score = minor * const_i32(tables, 1011, 100);
@@ -978,8 +1052,11 @@ impl RougeManager {
             .rouge_difficulty(start.difficulty)
             .map(|row| row.score_reward)
             .unwrap_or(100)
-            .max(1);
-        let final_score = base * efficiency / 100;
+            .max(1)
+            + flow::bonuses(&run).credit_percent;
+        // Same-kind credit percentages add to the displayed efficiency. The
+        // stacking policy beyond the captured difficulty-I profile is inferred.
+        let final_score = (base as i64 * efficiency as i64 / 100).min(i32::MAX as i64) as i32;
 
         // 金巷信物 = 信用 / 2500, 刻画的枝芽 = 信用 / 700, remainders carry over.
         let point_div = const_i32(tables, 1018, 2500).max(1);
@@ -990,6 +1067,8 @@ impl RougeManager {
         let add_genius_point = genius_total / genius_div;
         let point_remainder = point_total % point_div;
         let genius_remainder = genius_total % genius_div;
+        let extra_balance = extra_rewards::balance(db, self.player_id, season).await?;
+        let extra_add_point = extra_rewards::quote(layers, extra_balance);
 
         // Official flow: settlement lands on the reward screen (`LastReward`), not
         // straight back on the setup screen.
@@ -1034,6 +1113,7 @@ impl RougeManager {
             step_num: Some(steps),
             final_score: Some(final_score),
             add_point: Some(add_point),
+            extra_add_point: Some(extra_add_point),
             remain_score2_point: Some(point_remainder),
             add_genius_point: Some(add_genius_point),
             remain_score2_genius_point: Some(genius_remainder),
@@ -1052,7 +1132,7 @@ impl RougeManager {
                 team_level: Some(team_progress(run.season, run.team_exp).0),
                 collection_num: Some(collection_num),
                 gain_coin: Some(run.coin + run.spent_coin),
-                layouts: run_bag.to_client().layouts,
+                layouts: artifact_payload::bag_payload(&run, &run_bag).layouts,
                 team_info: persisted_team(&run),
                 end_id: Some(if cleared { details.end_id } else { 0 }),
                 layer_id: Some(run.layer_id),
@@ -1081,6 +1161,10 @@ impl RougeManager {
             add_point,
             &serde_json::to_string(&snapshot)?,
             &serde_json::to_string(&result)?,
+            extra_balance,
+            extra_add_point,
+            run.seed,
+            run.terminal_state,
         )
         .await?
         {
@@ -1112,7 +1196,11 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
-        Ok((bag::RunBag::to_client_layout(&item), from_warehouse))
+        let mut run = run;
+        run.bag = encoded;
+        let mut layout = bag::RunBag::to_client_layout(&item);
+        artifact_payload::decorate_layouts(&run, &run_bag, std::slice::from_mut(&mut layout));
+        Ok((layout, from_warehouse))
     }
 
     pub async fn remove_from_bar(
@@ -1134,7 +1222,9 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
-        Ok(bag::RunBag::to_client_item(&item))
+        let mut run = run;
+        run.bag = encoded;
+        Ok(artifact_payload::item_payload(&run, &item))
     }
 
     pub async fn one_key_add_to_bar(
@@ -1155,7 +1245,11 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
-        Ok(items.iter().map(bag::RunBag::to_client_layout).collect())
+        let mut run = run;
+        run.bag = encoded;
+        let mut layouts: Vec<_> = items.iter().map(bag::RunBag::to_client_layout).collect();
+        artifact_payload::decorate_layouts(&run, &run_bag, &mut layouts);
+        Ok(layouts)
     }
 
     pub async fn one_key_remove_from_bar(
@@ -1176,7 +1270,12 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
-        Ok(items.iter().map(bag::RunBag::to_client_item).collect())
+        let mut run = run;
+        run.bag = encoded;
+        Ok(items
+            .iter()
+            .map(|item| artifact_payload::item_payload(&run, item))
+            .collect())
     }
 
     /// Inlays an enchant into one hole of a placed artefact.
@@ -1223,18 +1322,20 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
+        let mut run = run;
+        run.bag = encoded;
         Ok((
-            bag::RunBag::to_client_item(&change.target),
+            artifact_payload::item_payload(&run, &change.target),
             change
                 .previous_holder
                 .as_ref()
-                .map(bag::RunBag::to_client_item),
+                .map(|item| artifact_payload::item_payload(&run, item)),
             change.removed_from_warehouse,
             change.removed_from_bag,
             change
                 .returned_to_warehouse
                 .as_ref()
-                .map(bag::RunBag::to_client_item),
+                .map(|item| artifact_payload::item_payload(&run, item)),
         ))
     }
 
@@ -1273,9 +1374,11 @@ impl RougeManager {
         if !rouge::update_run_bag(db, self.player_id, season, &encoded).await? {
             return Err(AppError::InvalidRequest);
         }
+        let mut run = run;
+        run.bag = encoded;
         Ok((
-            bag::RunBag::to_client_item(&change.target),
-            bag::RunBag::to_client_item(&change.enchant),
+            artifact_payload::item_payload(&run, &change.target),
+            artifact_payload::item_payload(&run, &change.enchant),
         ))
     }
 
@@ -1451,7 +1554,10 @@ impl RougeManager {
         flow::advance(&mut run, pending.index as usize + 1)?;
         flow::finish_node(&mut run)?;
         flow::save(db, &expected, &run).await?;
-        Ok((team, map_info(&run)))
+        Ok((
+            persisted_team(&run).ok_or(AppError::InvalidRequest)?,
+            map_info(&run),
+        ))
     }
 
     /// Applies one pending healing interaction and advances its choice pipeline.
@@ -1555,8 +1661,9 @@ impl RougeManager {
                 .rouge_drop
                 .get(pending.config_id)
                 .ok_or(AppError::InvalidRequest)?;
-            next.coin = next.coin.saturating_add(drop_coin(row));
-            next.team_exp = next.team_exp.saturating_add(flow::reward_exp(row.id));
+            let reward = flow::reward(&run, row.id);
+            next.coin = next.coin.saturating_add(reward.coin);
+            next.team_exp = next.team_exp.saturating_add(reward.exp);
         }
         flow::advance(&mut next, pending.index as usize + 1)?;
         flow::queue_level_recruit(&mut next, run.team_exp);
@@ -1722,7 +1829,10 @@ impl RougeManager {
             .await?
             .ok_or(AppError::InvalidRequest)?;
         let run = flow::resume(db, run).await?;
-        Ok((team, map_info(&run)))
+        Ok((
+            persisted_team(&run).ok_or(AppError::InvalidRequest)?,
+            map_info(&run),
+        ))
     }
 
     pub async fn outside_info(
@@ -1751,6 +1861,7 @@ pub async fn rouge_outside_info(
     season: i32,
 ) -> Result<GetRougeOutsideInfoReply, AppError> {
     let outside = rouge::get_or_create_outside(db, user_id, season).await?;
+    let extra_balance = extra_rewards::balance(db, user_id, season).await?;
     let genius_ids = rouge::list_genius(db, user_id, season).await?;
     let pass_entrust_id = rouge::completed_entrusts(db, user_id, season).await?;
     let cleared = rouge::cleared_difficulties(db, user_id, season).await?;
@@ -1787,7 +1898,7 @@ pub async fn rouge_outside_info(
             }),
             is_genius_new_stage: Some(false),
             limiter_info: None,
-            cur_extra_point: Some(0),
+            cur_extra_point: Some(extra_balance),
         }),
     })
 }
@@ -1990,8 +2101,24 @@ fn rouge_info_from(start: &RougeStart, run: Option<&RougeRun>) -> RougeInfo {
         .unwrap_or(style_power_limit);
 
     let (bag_payload, warehouse_payload) = run
-        .and_then(|row| serde_json::from_str::<bag::RunBag>(&row.bag).ok())
-        .map(|bag| (bag.to_client(), bag.to_warehouse()))
+        .and_then(|row| {
+            serde_json::from_str::<bag::RunBag>(&row.bag)
+                .ok()
+                .map(|bag| (row, bag))
+        })
+        .map(|(run, bag)| {
+            (
+                artifact_payload::bag_payload(run, &bag),
+                sonettobuf::RougeWarehouse {
+                    items: bag
+                        .items
+                        .iter()
+                        .filter(|item| !bag::RunBag::is_placed(item))
+                        .map(|item| artifact_payload::item_payload(run, item))
+                        .collect(),
+                },
+            )
+        })
         .unwrap_or_default();
 
     let hero_ids = json_ids(&start.hero_ids);
@@ -2147,6 +2274,50 @@ pub fn battle_automatic_reward(event_id: i32) -> (i32, i32) {
         .unwrap_or_default()
 }
 
+pub fn battle_reward_preview_for(run: &RougeRun, event_id: i32) -> (i32, i32, i32, i32) {
+    let tables = config::configs::get();
+    let Some(id) = tables
+        .rouge_fight_event
+        .get(event_id)
+        .and_then(|event| supported_interactive(&event.advance_interactive))
+        .filter(|(kind, _)| *kind == INTERACT_ADVANCE_DROP)
+        .map(|(_, id)| id)
+    else {
+        return (0, 0, 0, 0);
+    };
+    let reward = flow::reward(run, id);
+    let drop = drop_state(run, id, tables);
+    (
+        reward.coin,
+        reward.exp,
+        drop.as_ref()
+            .map(|drop| drop.offers.len() as i32)
+            .unwrap_or(0),
+        drop.map(|drop| drop.select_count).unwrap_or(0),
+    )
+}
+
+pub fn battle_automatic_reward_for(run: &RougeRun, event_id: i32) -> (i32, i32) {
+    let tables = config::configs::get();
+    let id = tables
+        .rouge_fight_event
+        .get(event_id)
+        .and_then(|event| supported_interactive(&event.advance_interactive))
+        .filter(|(kind, _)| *kind == INTERACT_ADVANCE_DROP)
+        .map(|(_, id)| id);
+    if let Some(id) = id
+        && tables
+            .rouge_drop
+            .get(id)
+            .is_some_and(|drop| drop.select_count == 0 && drop.drop.is_empty())
+    {
+        let reward = flow::reward(run, id);
+        (reward.coin, reward.exp)
+    } else {
+        (0, 0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingInteractive {
     index: i32,
@@ -2250,6 +2421,8 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
     }
     let mut offers = Vec::new();
     let refresh = run.interactive_refresh.max(0) as u64;
+    let reward = flow::reward(run, drop_id);
+    let last_entry = row.drop.split('|').count().saturating_sub(1);
     for (entry_index, entry) in row.drop.split('|').enumerate() {
         let mut fields = entry.split('#');
         let count: i32 = fields.next()?.trim().parse().ok()?;
@@ -2258,6 +2431,12 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
         if fields.next().is_some() || count <= 0 || rate <= 0 {
             return None;
         }
+        let count = count
+            + if entry_index == last_entry {
+                reward.extra_drops
+            } else {
+                0
+            };
         for draw in 0..count {
             let base_salt = (drop_id as u64)
                 .wrapping_mul(257)
@@ -2281,9 +2460,10 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
             offers.push(selected?);
         }
     }
-    (offers.len() >= row.select_count as usize).then_some(DropState {
+    let select_count = row.select_count + reward.extra_select;
+    (offers.len() >= select_count as usize).then_some(DropState {
         offers,
-        select_count: row.select_count,
+        select_count,
     })
 }
 
@@ -2554,6 +2734,21 @@ pub fn automatic_fight_entrust_update(
     )
 }
 
+pub fn automatic_fight_resource_update(
+    run: &RougeRun,
+    gained_coin: i32,
+    gained_power: i32,
+) -> Result<String, AppError> {
+    updated_entrust(
+        run,
+        EntrustChange {
+            gained_coin,
+            gained_power,
+            ..Default::default()
+        },
+    )
+}
+
 fn middle_state(run: &RougeRun) -> MiddleState {
     let previous = serde_json::from_str::<MiddleState>(&run.middle_state).ok();
     if let Some(state) = &previous {
@@ -2766,9 +2961,9 @@ fn node_event_data(
                     position.to_string(),
                     serde_json::json!({
                         "collectionId": goods.creator,
-                        "discountRate": -1,
+                        "discountRate": if flow::shop_price(run,goods.price) < goods.price { flow::shop_price(run,goods.price) * 1000 / goods.price.max(1) } else { -1 },
                         "originalPrice": goods.price,
-                        "price": goods.price,
+                        "price": flow::shop_price(run,goods.price),
                     }),
                 );
             }
@@ -3061,7 +3256,9 @@ async fn start_run(
     let graph = serde_json::to_string(&layer_map)?;
 
     let style = tables.rouge_style(start.season, start.style);
-    let mut coin = style.map(|row| row.coin).unwrap_or_default();
+    let genius_ids = rouge::list_genius(db, user_id, start.season).await?;
+    let growth = genius_bonuses::from_ids(tables, &genius_ids);
+    let mut coin = style.map(|row| row.coin).unwrap_or_default() + growth.initial_coin;
     let (power, mut power_limit) =
         starting_power(tables, start.season, start.style, start.difficulty);
 
@@ -3119,9 +3316,16 @@ async fn start_run(
         return Err(AppError::InvalidRequest);
     }
 
-    rouge::get_run(db, user_id, start.season)
+    let mut run = rouge::get_run(db, user_id, start.season)
         .await?
-        .ok_or(AppError::InvalidRequest)
+        .ok_or(AppError::InvalidRequest)?;
+    let before = run.clone();
+    let mut details = flow::details(&run);
+    details.outside_genius = Some(genius_ids);
+    details.safe_zone_recovery = style.map(|style| style.power);
+    run.details = serde_json::to_string(&details)?;
+    flow::save(db, &before, &run).await?;
+    Ok(run)
 }
 
 #[cfg(test)]
@@ -5162,8 +5366,10 @@ mod original_tests {
             .select_heroes(&db, 1, &[3003, 3004, 3007, 3010], 0)
             .await
             .unwrap();
-        // A failed terminal run still receives score rewards but does not clear
-        // the difficulty. Settlement credits 1 bud (770 / 700).
+        // A failure after clearing area one still receives its layer score.
+        // This fixture isolates spending the earned bud rather than map travel.
+        sqlx::query("UPDATE user_rouge_run SET map_type = 2, middle_layer_id = 111 WHERE user_id = 1 AND season = 1")
+            .execute(&db).await.unwrap();
         set_terminal_state(&db, 2).await;
         player.end(&db, 1).await.unwrap();
         assert!(

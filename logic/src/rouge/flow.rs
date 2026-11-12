@@ -7,6 +7,12 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Details {
+    /// Snapshot permanent growth at run creation. None marks a pre-upgrade run.
+    pub outside_genius: Option<Vec<i32>>,
+    pub battle_reward: Option<BattleReward>,
+    pub artifact_state: super::artifact_rules::MapState,
+    pub artifact_power_limit_bonus: i32,
+    pub safe_zone_recovery: Option<i32>,
     pub active_talents: Vec<usize>,
     pub end_episode: i32,
     pub end_id: i32,
@@ -16,8 +22,86 @@ pub struct Details {
     pub effects: Vec<i32>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BattleReward {
+    pub node_id: i32,
+    pub drop_id: i32,
+    pub coin: i32,
+    pub exp: i32,
+    pub extra_drops: i32,
+    pub extra_select: i32,
+}
+
 pub fn details(run: &RougeRun) -> Details {
     serde_json::from_str(&run.details).unwrap_or_default()
+}
+
+pub fn bonuses(run: &RougeRun) -> super::genius_bonuses::Bonuses {
+    let state = details(run);
+    super::genius_bonuses::from_ids(
+        config::configs::get(),
+        state.outside_genius.as_deref().unwrap_or_default(),
+    )
+}
+
+pub fn completed_layers(run: &RougeRun) -> i32 {
+    // Entering an area is not clearing it. The first battle loss in area two
+    // is captured as one cleared area (750 credit and two bonus Keepsakes).
+    run.layer_index.max(0) + i32::from(run.map_type == MAP_TYPE_MIDDLE || run.terminal_state == 1)
+}
+
+pub fn reward(run: &RougeRun, drop_id: i32) -> BattleReward {
+    if let Some(quote) = details(run).battle_reward
+        && quote.node_id == run.node_id
+        && quote.drop_id == drop_id
+    {
+        return quote;
+    }
+    let growth = bonuses(run);
+    let extra = growth.extra_drops(drop_id);
+    let item_bonus = serde_json::from_str::<bag::RunBag>(&run.bag)
+        .ok()
+        .map(|bag| {
+            super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin)
+                .coin_drop_bonus_per_mille
+        })
+        .unwrap_or(0);
+    BattleReward {
+        node_id: run.node_id,
+        drop_id,
+        coin: config::configs::get()
+            .rouge_drop
+            .get(drop_id)
+            .map(|row| {
+                ((drop_coin(row) as i64
+                    * (1000 + 10 * (growth.coin_percent + growth.battle_coin_percent) + item_bonus)
+                        .max(0) as i64
+                    / 1000)
+                    .min(i32::MAX as i64)) as i32
+            })
+            .unwrap_or(0),
+        exp: super::genius_bonuses::scale(reward_exp(drop_id), growth.essence_percent),
+        extra_drops: extra.0,
+        extra_select: extra.1,
+    }
+}
+
+pub fn freeze_battle_reward(run: &mut RougeRun, event_id: i32) -> Result<(), AppError> {
+    let tables = config::configs::get();
+    let mut detail = details(run);
+    detail.battle_reward = None;
+    run.details = serde_json::to_string(&detail)?;
+    if let Some(drop_id) = tables
+        .rouge_fight_event
+        .get(event_id)
+        .and_then(|event| supported_interactive(&event.advance_interactive))
+        .filter(|(kind, _)| *kind == INTERACT_ADVANCE_DROP)
+        .map(|(_, id)| id)
+    {
+        detail.battle_reward = Some(reward(run, drop_id));
+    }
+    run.details = serde_json::to_string(&detail)?;
+    Ok(())
 }
 
 /// The settlement includes inlaid Ritual Disks as owned collections too.
@@ -71,10 +155,10 @@ pub fn apply_team_life(
 /// Attribute entries use the same per-mille values as the hero builder.
 /// Only explicit numeric attributes are interpreted here; scripted talent
 /// effects still require their combat implementation.
-pub fn apply_talent_attributes(fight: &mut sonettobuf::Fight, start: &RougeStart, run: &RougeRun) {
+pub fn attribute_rates(start: &RougeStart, run: &RougeRun) -> BTreeMap<i32, i32> {
     let tables = config::configs::get();
     let tree = talent_tree(start, run);
-    let mut rates: BTreeMap<i32, i32> = BTreeMap::new();
+    let mut rates = bonuses(run).attributes;
     for talent in tree
         .rouge_talent
         .iter()
@@ -90,25 +174,7 @@ pub fn apply_talent_attributes(fight: &mut sonettobuf::Fight, start: &RougeStart
             }
         }
     }
-    if let Some(team) = &mut fight.attacker {
-        for entity in team.entitys.iter_mut().chain(team.sub_entitys.iter_mut()) {
-            if let Some(attr) = &mut entity.attr {
-                for (id, stat) in [
-                    (101, &mut attr.hp),
-                    (102, &mut attr.attack),
-                    (103, &mut attr.defense),
-                    (104, &mut attr.mdefense),
-                ] {
-                    if let Some(value) = stat {
-                        *value = ((*value as i64
-                            * (1000 + rates.get(&id).copied().unwrap_or(0)) as i64
-                            / 1000)
-                            .clamp(0, i32::MAX as i64)) as i32;
-                    }
-                }
-            }
-        }
-    }
+    rates
 }
 
 pub fn team_capacity(start: &RougeStart, run: &RougeRun) -> i32 {
@@ -116,6 +182,7 @@ pub fn team_capacity(start: &RougeStart, run: &RougeRun) -> i32 {
         .rouge_style(start.season, start.style)
         .map(|style| style.capacity)
         .unwrap_or_default()
+        + bonuses(run).initial_capacity
         + (team_progress(run.season, run.team_exp).0 - 1).max(0) * 2
 }
 
@@ -185,8 +252,12 @@ pub fn talent_points(run: &RougeRun) -> i32 {
 
 /// Optimistic update of one complete interaction. In particular, item removal,
 /// resource payment, recruitment and map transitions cannot partially commit.
-pub async fn save(db: &SqlitePool, expected: &RougeRun, run: &RougeRun) -> Result<(), AppError> {
-    let changed = sqlx::query("UPDATE user_rouge_run SET bag = ?, team = ?, coin = ?, power = ?, power_limit = ?, team_exp = ?, choices = ?, finished = ?, middle_state = ?, details = ?, shop = ?, battle_interactive = ?, interactive_index = ?, interactive_refresh = ?, map_type = ?, middle_layer_id = ?, position_index = ?, terminal_state = ?, spent_coin = ?, stage = ?, node_id = ? WHERE user_id = ? AND season = ? AND bag = ? AND team = ? AND coin = ? AND power = ? AND power_limit = ? AND team_exp = ? AND choices = ? AND finished = ? AND middle_state = ? AND details = ? AND shop = ? AND battle_interactive = ? AND interactive_index = ? AND interactive_refresh = ? AND map_type = ? AND middle_layer_id = ? AND position_index = ? AND terminal_state = ? AND layer_id = ? AND node_id = ?")
+pub async fn save<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    expected: &RougeRun,
+    run: &RougeRun,
+) -> Result<(), AppError> {
+    let changed = sqlx::query("UPDATE user_rouge_run SET bag = ?, team = ?, coin = ?, power = ?, power_limit = ?, team_exp = ?, choices = ?, finished = ?, middle_state = ?, details = ?, shop = ?, battle_interactive = ?, interactive_index = ?, interactive_refresh = ?, map_type = ?, middle_layer_id = ?, position_index = ?, terminal_state = ?, spent_coin = ?, stage = ?, node_id = ? WHERE user_id = ? AND season = ? AND bag = ? AND team = ? AND coin = ? AND power = ? AND power_limit = ? AND team_exp = ? AND choices = ? AND finished = ? AND middle_state = ? AND details = ? AND shop = ? AND battle_interactive = ? AND interactive_index = ? AND interactive_refresh = ? AND map_type = ? AND middle_layer_id = ? AND position_index = ? AND terminal_state = ? AND layer_id = ? AND node_id = ? AND seed = ?")
         .bind(&run.bag).bind(&run.team).bind(run.coin).bind(run.power).bind(run.power_limit)
         .bind(run.team_exp).bind(&run.choices).bind(&run.finished).bind(&run.middle_state)
         .bind(&run.details).bind(&run.shop).bind(&run.battle_interactive).bind(run.interactive_index)
@@ -199,6 +270,7 @@ pub async fn save(db: &SqlitePool, expected: &RougeRun, run: &RougeRun) -> Resul
         .bind(&expected.shop).bind(&expected.battle_interactive).bind(expected.interactive_index)
         .bind(expected.interactive_refresh).bind(expected.map_type).bind(expected.middle_layer_id)
         .bind(expected.position_index).bind(expected.terminal_state).bind(expected.layer_id).bind(expected.node_id)
+        .bind(expected.seed)
         .execute(db).await?;
     if changed.rows_affected() != 1 {
         return Err(AppError::InvalidRequest);
@@ -226,7 +298,25 @@ pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
     run.battle_interactive.clear();
     // Catalyst recovery is applied on entering, never on moving around a zone.
     // All current base catalysts state recovery of their initial Stimulus.
-    run.power = run.power_limit;
+    sync_artifact_limit(run)?;
+    let before_recovery = run.clone();
+    run.power = run
+        .power
+        .saturating_add(details(run).safe_zone_recovery.unwrap_or(40))
+        .min(run.power_limit);
+    let heal = bonuses(run).safe_heal;
+    if heal > 0 {
+        heal_all(run, heal)?;
+    }
+    apply_map_effects(run, super::artifact_rules::MapTrigger::EnterSafeZone)?;
+    run.middle_state = updated_entrust(
+        &before_recovery,
+        EntrustChange {
+            gained_coin: (run.coin - before_recovery.coin).max(0),
+            gained_power: (run.power - before_recovery.power).max(0),
+            ..Default::default()
+        },
+    )?;
     let mut state = middle_state(run);
     if let Some(entrust) = config::configs::get().rouge_entrust.get(state.entrust_id) {
         if entrust_completed(entrust, state.entrust_progress) {
@@ -245,7 +335,10 @@ pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
                 && (entrust.interactive.is_empty() || supported.is_some())
             {
                 if let Some(reward) = reward {
-                    run.coin = reward.resources.coin;
+                    run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
+                        reward.coin_delta,
+                        bonuses(run).coin_percent,
+                    ));
                     run.power = reward.resources.power;
                     run.power_limit = reward.resources.power_limit;
                 }
@@ -270,11 +363,97 @@ pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
 
 pub async fn resume(db: &SqlitePool, expected: RougeRun) -> Result<RougeRun, AppError> {
     let mut run = expected.clone();
+    sync_artifact_limit(&mut run)?;
     finish_node(&mut run)?;
-    if run.map_type != expected.map_type {
+    if run.map_type != expected.map_type
+        || run.details != expected.details
+        || run.power_limit != expected.power_limit
+        || run.power != expected.power
+    {
         save(db, &expected, &run).await?;
     }
     Ok(run)
+}
+
+pub fn sync_artifact_limit(run: &mut RougeRun) -> Result<(), AppError> {
+    let Ok(bag) = serde_json::from_str::<bag::RunBag>(&run.bag) else {
+        return Ok(());
+    };
+    let effects = super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin);
+    let mut detail = details(run);
+    let delta = effects
+        .power_limit_bonus
+        .saturating_sub(detail.artifact_power_limit_bonus);
+    run.power_limit = run.power_limit.saturating_add(delta).max(0);
+    run.power = run.power.clamp(0, run.power_limit);
+    detail.artifact_power_limit_bonus = effects.power_limit_bonus;
+    run.details = serde_json::to_string(&detail)?;
+    Ok(())
+}
+
+/// Trigger, counter advance, consumption and resource changes are prepared on
+/// one run snapshot. The caller commits them with its owning action.
+pub fn apply_map_effects(
+    run: &mut RougeRun,
+    trigger: super::artifact_rules::MapTrigger,
+) -> Result<(), AppError> {
+    sync_artifact_limit(run)?;
+    let Ok(mut bag) = serde_json::from_str::<bag::RunBag>(&run.bag) else {
+        return Ok(());
+    };
+    let mut detail = details(run);
+    let change = super::artifact_rules::evaluate_map(
+        config::configs::get(),
+        &bag,
+        trigger,
+        &detail.artifact_state,
+    );
+    run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
+        change.coin,
+        bonuses(run).coin_percent,
+    ));
+    run.power = run
+        .power
+        .saturating_add(change.power)
+        .clamp(0, run.power_limit);
+    if change.heal_per_mille > 0 {
+        heal_all(run, change.heal_per_mille)?;
+    }
+    if !change.consume_uids.is_empty() {
+        bag.items
+            .retain(|item| !change.consume_uids.contains(&item.uid));
+        run.bag = serde_json::to_string(&bag)?;
+    }
+    detail.artifact_state = change.state;
+    run.details = serde_json::to_string(&detail)?;
+    sync_artifact_limit(run)?;
+    Ok(())
+}
+
+pub fn after_victory(run: &mut RougeRun, event_type: i32) -> Result<(), AppError> {
+    let bonus = bonuses(run);
+    let (heal, power) = match event_type {
+        1 => (bonus.minor_heal, 0),
+        2 => (bonus.danger_heal, bonus.danger_power),
+        _ => (0, 0),
+    };
+    if heal > 0 {
+        heal_all(run, heal)?;
+    }
+    run.power = run.power.saturating_add(power).min(run.power_limit);
+    apply_map_effects(run, super::artifact_rules::MapTrigger::BattleWin)
+}
+
+pub fn shop_price(run: &RougeRun, original: i32) -> i32 {
+    let reduction = serde_json::from_str::<bag::RunBag>(&run.bag)
+        .ok()
+        .map(|bag| {
+            super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin)
+                .shop_price_reduction_per_mille
+        })
+        .unwrap_or(0)
+        .clamp(0, 1000);
+    (original.max(0) as i64 * (1000 - reduction) as i64 / 1000).min(i32::MAX as i64) as i32
 }
 
 pub fn queue_level_recruit(run: &mut RougeRun, old_exp: i32) {
@@ -581,7 +760,10 @@ pub fn apply_automatic_drop(run: &mut RougeRun, drop_id: i32) -> Result<(), AppE
     let tables = config::configs::get();
     // This respite reward is referenced by 3.9 but absent from the export.
     if drop_id == 10610206 {
-        run.team_exp = run.team_exp.saturating_add(20);
+        run.team_exp = run.team_exp.saturating_add(super::genius_bonuses::scale(
+            20,
+            bonuses(run).essence_percent,
+        ));
         return Ok(());
     }
     let row = tables
@@ -601,12 +783,18 @@ pub fn apply_automatic_drop(run: &mut RougeRun, drop_id: i32) -> Result<(), AppE
         }
         run.bag = serde_json::to_string(&bag)?;
     }
-    run.coin = run.coin.saturating_add(drop_coin(row));
+    run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
+        drop_coin(row),
+        bonuses(run).coin_percent,
+    ));
     run.power = run
         .power
         .saturating_add(row.power)
         .clamp(0, run.power_limit);
-    run.team_exp = run.team_exp.saturating_add(row.exp.max(0));
+    run.team_exp = run.team_exp.saturating_add(super::genius_bonuses::scale(
+        row.exp.max(0),
+        bonuses(run).essence_percent,
+    ));
     Ok(())
 }
 
@@ -623,8 +811,22 @@ pub fn apply_effect(run: &mut RougeRun, effect_id: i32) -> Result<(), AppError> 
             bag.add(id)?;
             run.bag = serde_json::to_string(&bag)?;
         }
-        (14, Some(amount)) => run.coin = run.coin.saturating_add(amount).max(0),
-        (15, Some(amount)) => run.team_exp = run.team_exp.saturating_add(amount).max(0),
+        (14, Some(amount)) => {
+            let amount = if amount > 0 {
+                super::genius_bonuses::scale(amount, bonuses(run).coin_percent)
+            } else {
+                amount
+            };
+            run.coin = run.coin.saturating_add(amount).max(0);
+        }
+        (15, Some(amount)) => {
+            let amount = if amount > 0 {
+                super::genius_bonuses::scale(amount, bonuses(run).essence_percent)
+            } else {
+                amount
+            };
+            run.team_exp = run.team_exp.saturating_add(amount).max(0);
+        }
         (16, Some(amount)) => run.power_limit = run.power_limit.saturating_add(amount).max(0),
         (17, Some(amount)) => {
             run.power = run.power.saturating_add(amount).clamp(0, run.power_limit)
@@ -974,7 +1176,7 @@ mod tests {
             .unwrap()
             .rouge_info
             .unwrap();
-        assert_eq!(outside.point, Some(3));
+        assert_eq!(outside.point, Some(11)); // 3 score rewards + 8 Craftmaster's Favors.
         assert_eq!(outside.genius_point, Some(13));
         assert_eq!(
             manager

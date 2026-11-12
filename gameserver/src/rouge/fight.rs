@@ -308,12 +308,28 @@ pub async fn settle_in_transaction(
     }
 
     let pipeline = if won {
+        crate::logic::rouge::flow::freeze_battle_reward(&mut run, node.event_id)?;
+        let before_resources = run.clone();
+        crate::logic::rouge::flow::after_victory(&mut run, node.node_type)?;
+        run.middle_state = crate::logic::rouge::automatic_fight_resource_update(
+            &before_resources,
+            (run.coin - before_resources.coin).max(0),
+            (run.power - before_resources.power).max(0),
+        )?;
+        sqlx::query("UPDATE user_rouge_run SET team = ?, coin = ?, power = ?, power_limit = ?, middle_state = ? WHERE user_id = ? AND season = 1")
+            .bind(&run.team).bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(player_id).execute(&mut **tx).await?;
+        persisted_team = serde_json::from_str(&run.team)?;
+        sqlx::query("UPDATE user_rouge_run SET details = ? WHERE user_id = ? AND season = 1")
+            .bind(&run.details)
+            .bind(player_id)
+            .execute(&mut **tx)
+            .await?;
         crate::logic::rouge::battle_reward_pipeline(node.event_id, final_node)
     } else {
         None
     };
     if won {
-        let (coin, exp) = crate::logic::rouge::battle_automatic_reward(node.event_id);
+        let (coin, exp) = crate::logic::rouge::battle_automatic_reward_for(&run, node.event_id);
         if coin > 0 || exp > 0 {
             sqlx::query("UPDATE user_rouge_run SET coin = coin + ?, team_exp = team_exp + ? WHERE user_id = ? AND season = 1")
                 .bind(coin).bind(exp).bind(player_id).execute(&mut **tx).await?;
@@ -349,14 +365,16 @@ pub async fn settle_in_transaction(
 
     if won && final_node && pipeline.is_none() {
         crate::logic::rouge::flow::finish_node(&mut run)?;
-        sqlx::query("UPDATE user_rouge_run SET map_type = ?, middle_layer_id = ?, position_index = ?, middle_state = ?, coin = ?, power = ?, power_limit = ?, battle_interactive = ?, interactive_index = ? WHERE user_id = ? AND season = 1")
+        sqlx::query("UPDATE user_rouge_run SET map_type = ?, middle_layer_id = ?, position_index = ?, middle_state = ?, coin = ?, power = ?, power_limit = ?, battle_interactive = ?, interactive_index = ?, team = ?, bag = ?, details = ? WHERE user_id = ? AND season = 1")
             .bind(run.map_type).bind(run.middle_layer_id).bind(run.position_index).bind(&run.middle_state)
             .bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.battle_interactive).bind(run.interactive_index)
+            .bind(&run.team).bind(&run.bag).bind(&run.details)
             .bind(player_id).execute(&mut **tx).await?;
+        persisted_team = serde_json::from_str(&run.team)?;
     }
 
     let (reward_coin, reward_exp, reward_count, reward_select) = if won {
-        crate::logic::rouge::battle_reward_preview(node.event_id)
+        crate::logic::rouge::battle_reward_preview_for(&run, node.event_id)
     } else {
         (0, 0, 0, 0)
     };

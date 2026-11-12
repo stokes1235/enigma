@@ -396,7 +396,28 @@ impl ActiveBattle {
 
         let checkpoint = self.checkpoint_json()?;
         let entry_cost = serde_json::to_string(costs)?;
+        let rouge_entry = if self.chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID {
+            let before = database::db::game::rouge::get_run(pool, player_id, 1)
+                .await?
+                .ok_or(AppError::InvalidRequest)?;
+            let mut after = before.clone();
+            crate::logic::rouge::flow::apply_map_effects(
+                &mut after,
+                crate::logic::rouge::artifact_rules::MapTrigger::EnterBattle,
+            )?;
+            after.middle_state = crate::logic::rouge::automatic_fight_resource_update(
+                &before,
+                (after.coin - before.coin).max(0),
+                (after.power - before.power).max(0),
+            )?;
+            Some((before, after))
+        } else {
+            None
+        };
         let mut tx = pool.begin().await?;
+        if let Some((before, after)) = &rouge_entry {
+            crate::logic::rouge::flow::save(&mut *tx, before, after).await?;
+        }
         let consumed = reward::RewardManager::new(player_id)
             .consume(&mut tx, costs)
             .await?;
