@@ -947,7 +947,7 @@ impl CardManager {
         self.register_skill_group(owner_uid, &entity.skill_group2);
     }
 
-    fn register_skill_group(&mut self, owner_uid: i64, skills: &[i32]) {
+    pub(crate) fn register_skill_group(&mut self, owner_uid: i64, skills: &[i32]) {
         for pair in skills.windows(2) {
             self.rank_up.insert((owner_uid, pair[0]), pair[1]);
         }
@@ -1030,6 +1030,23 @@ impl CardManager {
     ) -> CardInfo {
         let index = self.deck.hand().len();
         let card = self.deck.add_temp_card(target_uid, skill_id, hero_id);
+        self.track_temporary(index);
+        card
+    }
+
+    pub(crate) fn add_support_card_for(
+        &mut self,
+        owner_uid: i64,
+        skill_id: i32,
+        hero_id: i32,
+    ) -> CardInfo {
+        let index = self.deck.hand().len();
+        let card = self.deck.add_to_hand(CardInfo {
+            uid: Some(owner_uid),
+            hero_id: Some(hero_id),
+            card_type: Some(sonettobuf::card_info::CardType::SupportNormal as i32),
+            ..temp_card(skill_id)
+        });
         self.track_temporary(index);
         card
     }

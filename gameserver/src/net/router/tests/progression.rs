@@ -28,6 +28,14 @@ async fn exercise_rouge_flow_wire() {
     database::db::game::rouge::get_or_create_start(&pool, player_id, 1)
         .await
         .unwrap();
+    database::db::game::rouge::get_or_create_outside(&pool, player_id, 1)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE user_rouge_outside SET point = 20 WHERE user_id = ? AND season = 1")
+        .bind(player_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("UPDATE user_rouge_start SET state = 4, difficulty = 1, style = 1 WHERE user_id = ? AND season = 1")
                 .bind(player_id).execute(&pool).await.unwrap();
     let mut bag = logic::rouge::bag::RunBag::from_layout("8#8", "").unwrap();
@@ -70,6 +78,39 @@ async fn exercise_rouge_flow_wire() {
         (
             CmdId::RougeEndCmd,
             sonettobuf::RougeEndRequest { season: Some(1) }.encode_to_vec(),
+        ),
+        (
+            CmdId::RougeGetUnlockCollectionsCmd,
+            sonettobuf::RougeGetUnlockCollectionsRequest { season: Some(1) }.encode_to_vec(),
+        ),
+        (
+            CmdId::RougeGetNewReddotInfoCmd,
+            sonettobuf::RougeGetNewReddotInfoRequest { season: Some(1) }.encode_to_vec(),
+        ),
+        (
+            CmdId::RougeMarkNewReddotCmd,
+            sonettobuf::RougeMarkNewReddotRequest {
+                season: Some(1),
+                r#type: Some(1),
+                id: Some(0),
+            }
+            .encode_to_vec(),
+        ),
+        (
+            CmdId::RougeReceivePointBonusCmd,
+            sonettobuf::RougeReceivePointBonusRequest {
+                season: Some(1),
+                bonus_id: Some(113),
+            }
+            .encode_to_vec(),
+        ),
+        (
+            CmdId::RougeMarkBonusNewStageCmd,
+            sonettobuf::RougeMarkBonusNewStageRequest { season: Some(1) }.encode_to_vec(),
+        ),
+        (
+            CmdId::GetRougeOutsideInfoCmd,
+            sonettobuf::GetRougeOutsideInfoRequest { season: Some(1) }.encode_to_vec(),
         ),
     ];
     for (sequence, (cmd, data)) in requests.into_iter().enumerate() {
@@ -138,6 +179,56 @@ async fn exercise_rouge_flow_wire() {
                 assert_eq!(
                     reply.result_info.unwrap().compose_res2_num_str.as_deref(),
                     Some("8250015#1")
+                );
+            }
+            CmdId::RougeGetUnlockCollectionsCmd => {
+                let reply = sonettobuf::RougeGetUnlockCollectionsReply::decode(&*body).unwrap();
+                assert!(reply.unlock_collection_ids.contains(&8110021));
+                assert!(!reply.unlock_collection_ids.contains(&8110410));
+            }
+            CmdId::RougeGetNewReddotInfoCmd => {
+                assert_eq!(
+                    sonettobuf::RougeGetNewReddotInfoReply::decode(&*body)
+                        .unwrap()
+                        .new_reddots
+                        .len(),
+                    4
+                );
+            }
+            CmdId::RougeMarkNewReddotCmd => {
+                assert_eq!(
+                    sonettobuf::RougeMarkNewReddotReply::decode(&*body)
+                        .unwrap()
+                        .id,
+                    Some(0)
+                );
+            }
+            CmdId::GetRougeOutsideInfoCmd => {
+                let info = sonettobuf::GetRougeOutsideInfoReply::decode(&*body)
+                    .unwrap()
+                    .rouge_info
+                    .unwrap();
+                assert!(
+                    info.game_record_info
+                        .unwrap()
+                        .pass_collections
+                        .contains(&8250015)
+                );
+                let bonus = info.bonus.unwrap();
+                assert_eq!(bonus.is_new_stage, Some(false));
+                assert_eq!(bonus.bonus_stages[0].bonus_ids, vec![111, 112, 113]);
+            }
+            CmdId::RougeReceivePointBonusCmd => {
+                let reply = sonettobuf::RougeReceivePointBonusReply::decode(&*body).unwrap();
+                assert_eq!(reply.bonus_id, Some(113));
+                assert_eq!(reply.bonus_stage.unwrap().bonus_ids, vec![111, 112, 113]);
+            }
+            CmdId::RougeMarkBonusNewStageCmd => {
+                assert_eq!(
+                    sonettobuf::RougeMarkBonusNewStageReply::decode(&*body)
+                        .unwrap()
+                        .season,
+                    Some(1)
                 );
             }
             _ => unreachable!(),

@@ -65,6 +65,19 @@ impl BattleRuntime {
             self.managers.rouge.context().is_none(),
             "Rouge context is already configured"
         );
+        let support_roots = context
+            .support_skills
+            .iter()
+            .flat_map(|support| support.skill_ids.iter().copied())
+            .collect::<Vec<_>>();
+        self.catalog_data
+            .expect("battle runtime was not constructed with a catalog")
+            .extend_skill_roots(&mut self.catalog, support_roots, std::iter::empty());
+        for support in &context.support_skills {
+            self.managers
+                .card
+                .register_skill_group(support.owner_uid, &support.skill_ids);
+        }
         crate::rouge::configure(&mut self.managers, context);
     }
 

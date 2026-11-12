@@ -52,6 +52,153 @@ pub async fn on_get_rouge2_outside_info(
         .await
 }
 
+pub async fn on_rouge_receive_point_bonus(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeReceivePointBonusRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let player_id = ctx.player()?.id;
+    let claim = ctx
+        .player()?
+        .rouge
+        .receive_point_bonus(
+            ctx.state.db,
+            season,
+            msg.bonus_id.ok_or(AppError::InvalidRequest)?,
+        )
+        .await?;
+    crate::util::push::send_applied_reward_pushes(
+        ctx,
+        player_id,
+        claim.outcome.rewards,
+        claim.outcome.material_changes,
+        None,
+    )
+    .await?;
+    ctx.notify(
+        CmdId::RougeUpdatePointPushCmd,
+        sonettobuf::RougeUpdatePointPush {
+            season: Some(season),
+            point: Some(claim.point),
+        },
+    )
+    .await?;
+    ctx.send_reply(
+        CmdId::RougeReceivePointBonusCmd,
+        claim.outcome.reply,
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_mark_bonus_stage(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeMarkBonusNewStageRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    ctx.player()?
+        .rouge
+        .mark_bonus_stage(ctx.state.db, season)
+        .await?;
+    ctx.send_reply(
+        CmdId::RougeMarkBonusNewStageCmd,
+        sonettobuf::RougeMarkBonusNewStageReply {
+            season: Some(season),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_unlock_collections(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeGetUnlockCollectionsRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let genius =
+        database::db::game::rouge::list_genius(ctx.state.db, ctx.player()?.id, season).await?;
+    let reply = crate::logic::rouge::favorites::unlock_collections_reply(
+        config::configs::get(),
+        season,
+        &genius,
+    )?;
+    ctx.send_reply(CmdId::RougeGetUnlockCollectionsCmd, reply, 0, req.up_tag)
+        .await
+}
+
+pub async fn on_rouge_get_reddots(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeGetNewReddotInfoRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let progress =
+        crate::logic::rouge::favorites::load(ctx.state.db, ctx.player()?.id, season).await?;
+    ctx.send_reply(
+        CmdId::RougeGetNewReddotInfoCmd,
+        sonettobuf::RougeGetNewReddotInfoReply {
+            season: Some(season),
+            new_reddots: progress.reddots(),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_mark_reddot(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeMarkNewReddotRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let kind = msg.r#type.ok_or(AppError::InvalidRequest)?;
+    let id = msg.id.ok_or(AppError::InvalidRequest)?;
+    if !database::db::game::rouge_favorites::mark_seen(
+        ctx.state.db,
+        ctx.player()?.id,
+        season,
+        kind,
+        id,
+    )
+    .await?
+    {
+        return Err(AppError::InvalidRequest);
+    }
+    ctx.send_reply(
+        CmdId::RougeMarkNewReddotCmd,
+        sonettobuf::RougeMarkNewReddotReply {
+            season: Some(season),
+            r#type: Some(kind),
+            id: Some(id),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_unlock_story(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeUnlockStoryRequest::decode(&req.data[..])?;
+    let reply = crate::logic::rouge::favorites::unlock_story(
+        ctx.state.db,
+        ctx.player()?.id,
+        msg.season.ok_or(AppError::InvalidRequest)?,
+        msg.story_id.ok_or(AppError::InvalidRequest)?,
+    )
+    .await?;
+    ctx.send_reply(CmdId::RougeUnlockStoryCmd, reply, 0, req.up_tag)
+        .await
+}
+
 pub async fn on_get_rouge2_info(
     ctx: &mut ConnectionContext,
     req: ClientPacket,

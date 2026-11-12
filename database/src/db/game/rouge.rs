@@ -711,6 +711,7 @@ pub async fn advance_run_layer(
     expected: &RougeRun,
     position: &RougeRunPosition,
     graph: &str,
+    details: &str,
     minor_count: i32,
     danger_count: i32,
     crisis_count: i32,
@@ -720,13 +721,13 @@ pub async fn advance_run_layer(
     let result = sqlx::query(
         "UPDATE user_rouge_run
          SET map_type = ?, layer_index = ?, layer_id = ?, stage = ?, node_id = ?,
-             middle_layer_id = ?, position_index = ?, graph = ?, choices = '{}', finished = '[]',
+             middle_layer_id = ?, position_index = ?, graph = ?, details = ?, choices = '{}', finished = '[]',
              shop = '', retry_num = 0, interactive_index = -1, interactive_refresh = 0, battle_interactive = '',
              minor_count = minor_count + ?,
              danger_count = danger_count + ?, crisis_count = crisis_count + ?,
              step_count = step_count + ?, updated_at = ?
          WHERE user_id = ? AND season = ? AND seed = ? AND layer_id = ?
-           AND layer_index = ? AND map_type = 2 AND terminal_state = 0",
+           AND layer_index = ? AND map_type = 2 AND terminal_state = 0 AND details = ?",
     )
     .bind(position.map_type)
     .bind(position.layer_index)
@@ -736,6 +737,7 @@ pub async fn advance_run_layer(
     .bind(position.middle_layer_id)
     .bind(position.position_index)
     .bind(graph)
+    .bind(details)
     .bind(minor_count)
     .bind(danger_count)
     .bind(crisis_count)
@@ -746,6 +748,7 @@ pub async fn advance_run_layer(
     .bind(expected.seed)
     .bind(expected.layer_id)
     .bind(expected.layer_index)
+    .bind(&expected.details)
     .execute(pool)
     .await?;
 

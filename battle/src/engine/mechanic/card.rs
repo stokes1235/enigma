@@ -45,6 +45,7 @@ impl CardMechanic {
             (base as i32)
                 .saturating_add(modifier)
                 .saturating_add(managers.card.hand_limit_bonus())
+                .saturating_add(crate::rouge::hand_limit_bonus(managers))
                 .max(0),
         )
         .unwrap_or(usize::MAX)

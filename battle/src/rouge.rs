@@ -34,6 +34,33 @@ pub struct RougeContext {
     /// first main ally is used for compatibility with older saved contexts.
     pub first_slot_uid: Option<i64>,
     pub conditional_modifiers: Vec<ConditionalModifier>,
+    pub support_skills: Vec<SupportSkill>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SupportSkill {
+    /// Deployed actor whose attributes and life govern the support cast.
+    pub owner_uid: i64,
+    /// Support character shown by CardInfo and the skill's animation.
+    pub hero_id: i32,
+    /// Frozen selected basic skill group, containing its rank-one/two/three IDs.
+    /// This batch does not turn a selected ultimate into a basic Aid card.
+    pub skill_ids: Vec<i32>,
+}
+
+pub(crate) fn hand_limit_bonus(managers: &BattleManagers) -> i32 {
+    managers
+        .rouge
+        .context()
+        .into_iter()
+        .flat_map(|context| &context.artefacts)
+        .map(|item| match item.item_id {
+            8230305 => 1,
+            8330306 => 2,
+            _ => 0,
+        })
+        .fold(0_i32, i32::saturating_add)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +138,33 @@ pub(crate) fn is_support_card(
         })
 }
 
+/// Keep the actor's numeric attributes but honor the selected support skill's
+/// configured Reality/Mental damage tag for this cast only.
+pub(crate) fn support_target_pool(
+    managers: &BattleManagers,
+    pool: &TargetPool,
+    source_uid: i64,
+    skill_id: i32,
+    card_index: i32,
+) -> Option<Box<TargetPool>> {
+    managers.rouge.context()?;
+    if !is_support_card(managers, source_uid, skill_id, card_index) {
+        return None;
+    }
+    let damage_type = match managers.catalog().skill_effect_tag(skill_id) {
+        1 => crate::engine::skill::target::EntityDamageType::Reality,
+        2 => crate::engine::skill::target::EntityDamageType::Mental,
+        _ => return None,
+    };
+    let mut view = Box::new(pool.clone());
+    for entity in view.attacker_main.iter_mut().chain(&mut view.attacker_all) {
+        if entity.uid == source_uid {
+            entity.damage_type = damage_type;
+        }
+    }
+    Some(view)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Artefact {
@@ -137,7 +191,7 @@ pub(crate) struct RougeRuntime {
 struct ActiveRouge {
     context: RougeContext,
     entered: bool,
-    aid_round: Option<i32>,
+    aid_since_settlement: bool,
     shield_round: Option<i32>,
     counters: Counters,
 }
@@ -229,13 +283,18 @@ pub(crate) fn opening(managers: &mut BattleManagers, pool: &TargetPool) -> Vec<R
 pub(crate) fn observe_events(
     managers: &mut BattleManagers,
     pool: &TargetPool,
-    round: i32,
+    _round: i32,
     events: &[BattleEvent],
 ) -> Vec<RuleOp> {
     let Some(context) = managers.rouge.context() else {
         return vec![];
     };
     let bottle = context.artefacts.iter().any(|item| item.item_id == 8130315);
+    let serums = context
+        .artefacts
+        .iter()
+        .filter(|item| item.item_id == 8210045)
+        .count();
     let mut result = Vec::new();
     for event in events {
         match event {
@@ -249,7 +308,7 @@ pub(crate) fn observe_events(
                     action.card_index,
                 );
                 if aid {
-                    managers.rouge.active.as_mut().unwrap().aid_round = Some(round);
+                    managers.rouge.active.as_mut().unwrap().aid_since_settlement = true;
                 }
                 if bottle
                     && matches!(action.rank, 2 | 3)
@@ -259,9 +318,20 @@ pub(crate) fn observe_events(
                     result.push(grant(uid, uid, 5041));
                 }
             }
-            // Off-brand Serum's kill buffs are identified (90331/90082),
-            // but 783 AddSupportCard and 739's random-group route are not
-            // implemented. Do not grant a state that stalls the next round.
+            BattleEvent::EntityDied(death)
+                if serums > 0
+                    && pool.source_is_attacker(death.source_uid)
+                    && pool.team_type(death.target_uid) == Some(2)
+                    && managers.hp.current(death.source_uid) > 0 =>
+            {
+                // Exact client states: Support I and random own Precast I.
+                // Credited killer as recipient remains a documented local
+                // interpretation until an official multi-ally sample exists.
+                for _ in 0..serums {
+                    result.push(grant(death.source_uid, death.source_uid, 90331));
+                    result.push(grant(death.source_uid, death.source_uid, 90082));
+                }
+            }
             _ => {}
         }
     }
@@ -276,7 +346,7 @@ pub(crate) fn round_end(
     let Some(state) = managers.rouge.active.as_ref() else {
         return vec![];
     };
-    if state.aid_round != Some(round) || state.shield_round == Some(round) {
+    if !state.aid_since_settlement || state.shield_round == Some(round) {
         return vec![];
     }
     let rate = state
@@ -291,7 +361,9 @@ pub(crate) fn round_end(
                 .max(0)
         })
         .fold(0_i32, i32::saturating_add);
-    managers.rouge.active.as_mut().unwrap().shield_round = Some(round);
+    let state = managers.rouge.active.as_mut().unwrap();
+    state.aid_since_settlement = false;
+    state.shield_round = Some(round);
     let mut result = Vec::new();
     if rate > 0 {
         for entity in pool
@@ -329,3 +401,6 @@ pub(crate) fn round_end(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod support_tests;

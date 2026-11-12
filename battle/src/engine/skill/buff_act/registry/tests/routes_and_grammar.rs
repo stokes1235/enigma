@@ -509,7 +509,7 @@ fn hero_temp_cards_keep_their_exact_round_start_route() {
         Some(EventKind::RoundStartCard)
     );
     assert!(has_destination(739, "CreateHeroTempCards", &[1, 2, 1]));
-    assert!(!has_destination(739, "CreateHeroTempCards", &[0, 2, 1]));
+    assert!(has_destination(739, "CreateHeroTempCards", &[0, 2, 1]));
     assert!(!has_destination(739, "CreateHeroTempCards", &[1, 2, 2]));
     assert!(find(739, "AddSpTempCard").is_none());
 }

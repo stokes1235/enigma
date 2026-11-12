@@ -319,6 +319,7 @@ pub async fn settle_in_transaction(
         crate::logic::rouge::flow::freeze_battle_reward(&mut run, node.event_id)?;
         let before_resources = run.clone();
         crate::logic::rouge::flow::after_victory(&mut run, node.node_type)?;
+        crate::logic::rouge::flow::special_battle_victory(&mut run, node.event_id)?;
         let count_items = |bag: &str| {
             serde_json::from_str::<crate::logic::rouge::bag::RunBag>(bag)
                 .ok()
@@ -326,7 +327,7 @@ pub async fn settle_in_transaction(
                 .unwrap_or_default()
         };
         run.middle_state = crate::logic::rouge::automatic_fight_outcome_update(
-            &before_resources,
+            &run,
             (run.coin - before_resources.coin).max(0),
             (run.power - before_resources.power).max(0),
             (count_items(&run.bag) - count_items(&before_resources.bag)).max(0),
@@ -412,6 +413,8 @@ pub async fn settle_in_transaction(
     }))
 }
 
+#[cfg(test)]
+mod story_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

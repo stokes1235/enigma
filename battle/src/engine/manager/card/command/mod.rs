@@ -28,6 +28,7 @@ pub enum TemporaryCardKind {
     ConfiguredSkill,
     ConfiguredSkill3,
     HeroSkill,
+    SupportSkill,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -766,8 +767,16 @@ pub(super) fn execute(
             if add.skill_id <= 0 || add.team_type == 0 {
                 return Err(CardCommandError::InvalidCommand);
             }
+            if add.kind == TemporaryCardKind::SupportSkill
+                && (add.target_uid == 0 || add.hero_id.is_none_or(|hero| hero <= 0))
+            {
+                return Err(CardCommandError::InvalidCommand);
+            }
             let card = match add.kind {
                 TemporaryCardKind::GenericSkill => manager.add_temp_card(add.skill_id),
+                TemporaryCardKind::SupportSkill => {
+                    manager.add_support_card_for(add.target_uid, add.skill_id, add.hero_id.unwrap())
+                }
                 TemporaryCardKind::ConfiguredSkill
                 | TemporaryCardKind::ConfiguredSkill3
                 | TemporaryCardKind::HeroSkill => manager.add_temp_card_for(
@@ -791,6 +800,7 @@ pub(super) fn execute(
                     TemporaryCardKind::ConfiguredSkill => CardChangeKind::TemporaryAdded,
                     TemporaryCardKind::ConfiguredSkill3 => CardChangeKind::ConfiguredSkill3Added,
                     TemporaryCardKind::HeroSkill => CardChangeKind::HeroTemporaryAdded,
+                    TemporaryCardKind::SupportSkill => CardChangeKind::HeroTemporaryAdded,
                 },
                 Some(card),
                 None,

@@ -126,10 +126,12 @@ fn project_frame(
         change_round_layout,
     )?;
     if effects.is_empty()
-        && !frame
-            .items
-            .iter()
-            .any(|item| matches!(item, FrameItem::Cue(RoundCue::CastStep)))
+        && !frame.items.iter().any(|item| {
+            matches!(
+                item,
+                FrameItem::Cue(RoundCue::CastStep | RoundCue::SupportHero { .. })
+            )
+        })
     {
         return Ok(None);
     }
@@ -139,15 +141,20 @@ fn project_frame(
             skill_id,
             card_index,
             target_uid,
-        } => Ok(Some(normalize_framed_step(
-            EffectPacket::skill_fight_step_with_card_index(
+        } => {
+            let mut step = normalize_framed_step(EffectPacket::skill_fight_step_with_card_index(
                 *skill_id,
                 *source_uid,
                 target_uid.unwrap_or_default(),
                 *card_index,
                 effects,
-            ),
-        ))),
+            ));
+            step.support_hero_id = frame.items.iter().find_map(|item| match item {
+                FrameItem::Cue(RoundCue::SupportHero { hero_id }) => Some(*hero_id),
+                _ => None,
+            });
+            Ok(Some(step))
+        }
         FrameOwner::ConduitSkill {
             source_uid,
             skill_id,
@@ -1459,7 +1466,7 @@ fn project_cue(
     change_round_layout: ChangeRoundWireLayout,
 ) -> Vec<ActEffect> {
     match cue {
-        RoundCue::CastStep => Vec::new(),
+        RoundCue::CastStep | RoundCue::SupportHero { .. } => Vec::new(),
         RoundCue::EnterFightDeal => vec![CardPacket::enter_fight_deal()],
         RoundCue::ClearUniversalCard => vec![EffectPacket::clear_universal_card()],
         RoundCue::DealCard1 => vec![CardPacket::deal_card1()],

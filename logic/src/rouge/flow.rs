@@ -10,6 +10,9 @@ pub struct Details {
     /// Snapshot permanent growth at run creation. None marks a pre-upgrade run.
     pub outside_genius: Option<Vec<i32>>,
     pub passed_endings: Option<Vec<i32>>,
+    /// Legacy runs keep their previous seeded candidates. New runs enforce
+    /// the captured outside-growth snapshot in every random collection pool.
+    pub collection_pool_version: i32,
     pub battle_reward: Option<BattleReward>,
     pub artifact_state: super::artifact_rules::MapState,
     pub artifact_power_limit_bonus: i32,
@@ -20,6 +23,7 @@ pub struct Details {
     pub consume_power: i32,
     pub repair_shop_num: i32,
     pub displace_num: i32,
+    pub special_events: super::special_events::State,
     pub compositions: BTreeMap<i32, i32>,
     pub triggered_talents: Vec<usize>,
     pub effects: Vec<i32>,
@@ -47,6 +51,18 @@ pub fn bonuses(run: &RougeRun) -> super::genius_bonuses::Bonuses {
         config::configs::get(),
         state.outside_genius.as_deref().unwrap_or_default(),
     )
+}
+
+pub fn eligible_collections(run: &RougeRun) -> Option<std::collections::BTreeSet<i32>> {
+    let detail = details(run);
+    (detail.collection_pool_version > 0).then(|| {
+        super::favorites::unlock_collection_ids(
+            config::configs::get(),
+            detail.outside_genius.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .collect()
+    })
 }
 
 pub fn completed_layers(run: &RougeRun) -> i32 {
@@ -273,7 +289,8 @@ pub async fn save<'e>(
     expected: &RougeRun,
     run: &RougeRun,
 ) -> Result<(), AppError> {
-    let changed = sqlx::query("UPDATE user_rouge_run SET bag = ?, team = ?, coin = ?, power = ?, power_limit = ?, team_exp = ?, choices = ?, finished = ?, middle_state = ?, details = ?, shop = ?, battle_interactive = ?, interactive_index = ?, interactive_refresh = ?, map_type = ?, middle_layer_id = ?, position_index = ?, terminal_state = ?, spent_coin = ?, stage = ?, node_id = ? WHERE user_id = ? AND season = ? AND bag = ? AND team = ? AND coin = ? AND power = ? AND power_limit = ? AND team_exp = ? AND choices = ? AND finished = ? AND middle_state = ? AND details = ? AND shop = ? AND battle_interactive = ? AND interactive_index = ? AND interactive_refresh = ? AND map_type = ? AND middle_layer_id = ? AND position_index = ? AND terminal_state = ? AND layer_id = ? AND node_id = ? AND seed = ?")
+    let changed = sqlx::query("UPDATE user_rouge_run SET graph = ?, retry_num = ?, bag = ?, team = ?, coin = ?, power = ?, power_limit = ?, team_exp = ?, choices = ?, finished = ?, middle_state = ?, details = ?, shop = ?, battle_interactive = ?, interactive_index = ?, interactive_refresh = ?, map_type = ?, middle_layer_id = ?, position_index = ?, terminal_state = ?, spent_coin = ?, stage = ?, node_id = ? WHERE user_id = ? AND season = ? AND bag = ? AND team = ? AND coin = ? AND power = ? AND power_limit = ? AND team_exp = ? AND choices = ? AND finished = ? AND middle_state = ? AND details = ? AND shop = ? AND battle_interactive = ? AND interactive_index = ? AND interactive_refresh = ? AND map_type = ? AND middle_layer_id = ? AND position_index = ? AND terminal_state = ? AND layer_id = ? AND node_id = ? AND seed = ? AND graph = ? AND retry_num = ?")
+        .bind(&run.graph).bind(run.retry_num)
         .bind(&run.bag).bind(&run.team).bind(run.coin).bind(run.power).bind(run.power_limit)
         .bind(run.team_exp).bind(&run.choices).bind(&run.finished).bind(&run.middle_state)
         .bind(&run.details).bind(&run.shop).bind(&run.battle_interactive).bind(run.interactive_index)
@@ -287,6 +304,7 @@ pub async fn save<'e>(
         .bind(expected.interactive_refresh).bind(expected.map_type).bind(expected.middle_layer_id)
         .bind(expected.position_index).bind(expected.terminal_state).bind(expected.layer_id).bind(expected.node_id)
         .bind(expected.seed)
+        .bind(&expected.graph).bind(expected.retry_num)
         .execute(db).await?;
     if changed.rows_affected() != 1 {
         return Err(AppError::InvalidRequest);
@@ -301,6 +319,105 @@ pub async fn save_action<'e>(
 ) -> Result<(), AppError> {
     super::artifact_lifecycle::prepare(expected, run)?;
     save(db, expected, run).await
+}
+
+pub fn place_special_events(run: &mut RougeRun) -> Result<(), AppError> {
+    if run.map_type != MAP_TYPE_NORMAL {
+        return Ok(());
+    }
+    let mut detail = details(run);
+    if detail.special_events.pending.is_empty() {
+        return Ok(());
+    }
+    let mut graph: map::LayerMap = serde_json::from_str(&run.graph)?;
+    let mut resolved: std::collections::BTreeSet<i32> =
+        json_ids(&run.finished).into_iter().collect();
+    let choices: HashMap<String, i32> = serde_json::from_str(&run.choices)?;
+    resolved.extend(choices.keys().filter_map(|id| id.parse::<i32>().ok()));
+    super::special_events::place_pending(
+        config::configs::get(),
+        &mut detail.special_events,
+        &mut graph,
+        Some(run.node_id),
+        &resolved,
+    )
+    .map_err(|_| AppError::InvalidRequest)?;
+    run.graph = serde_json::to_string(&graph)?;
+    run.details = serde_json::to_string(&detail)?;
+    Ok(())
+}
+
+pub fn apply_special_reward(
+    run: &mut RougeRun,
+    reward: super::special_events::FixedReward,
+) -> Result<(), AppError> {
+    if run.coin < reward.coin_cost {
+        return Err(AppError::InsufficientCurrency);
+    }
+    run.coin -= reward.coin_cost;
+    run.spent_coin = run.spent_coin.saturating_add(reward.coin_cost);
+    run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
+        reward.coin_gain,
+        bonuses(run).coin_percent,
+    ));
+    let spent = run.power.min(reward.power_cost_up_to.max(0));
+    run.power -= spent;
+    let mut detail = details(run);
+    detail.consume_power = detail.consume_power.saturating_add(spent);
+    run.details = serde_json::to_string(&detail)?;
+    if reward.current_life_cost_per_mille > 0 {
+        let mut team: RougeTeamInfo = serde_json::from_str(&run.team)?;
+        for life in &mut team.hero_life_list {
+            if let Some(hp) = life.life.filter(|hp| *hp > 0) {
+                life.life = Some(
+                    (hp * (1000 - reward.current_life_cost_per_mille.clamp(0, 1000)) / 1000).max(1),
+                );
+            }
+        }
+        run.team = serde_json::to_string(&team)?;
+    }
+    let mut bag: bag::RunBag = serde_json::from_str(&run.bag)?;
+    for id in reward.grant_items {
+        // Ending keys are unique; another source must not create a second copy.
+        if !collection_shapes::is_unique(*id)
+            || !super::artifact_lifecycle::owned(&bag)
+                .values()
+                .any(|owned| owned == id)
+        {
+            bag.add(*id)?;
+        }
+    }
+    run.bag = serde_json::to_string(&bag)?;
+    Ok(())
+}
+
+pub fn special_battle_victory(run: &mut RougeRun, event_id: i32) -> Result<(), AppError> {
+    let mut detail = details(run);
+    let mut middle = serde_json::from_str::<MiddleState>(&run.middle_state)
+        .unwrap_or_else(|_| middle_state(run));
+    let Some(reward) = super::special_events::complete_battle(
+        &mut detail.special_events,
+        super::special_events::BattleSource {
+            layer_id: run.layer_id,
+            node_id: run.node_id,
+            event_id,
+        },
+        middle.entrust_id,
+        true,
+    ) else {
+        return Ok(());
+    };
+    run.details = serde_json::to_string(&detail)?;
+    apply_special_reward(run, reward.reward)?;
+    if let Some(entrust) = reward.complete_entrust {
+        if !middle.completed_entrusts.contains(&entrust) {
+            middle.completed_entrusts.push(entrust);
+        }
+        middle.entrust_id = 0;
+        middle.entrust_progress = 0;
+        run.middle_state = serde_json::to_string(&middle)?;
+    }
+    Ok(())
 }
 
 /// Completing a leaf enters its safe zone even when it was a treasure/rest
@@ -378,6 +495,9 @@ pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
                 state.entrust_progress = 0;
             }
         } else if entrust.incomplete_effect.is_empty() {
+            let mut detail = details(run);
+            super::special_events::cancel_entrust(&mut detail.special_events, state.entrust_id);
+            run.details = serde_json::to_string(&detail)?;
             state.entrust_id = 0;
             state.entrust_progress = 0;
         }
@@ -451,6 +571,7 @@ pub(super) fn apply_map_effects_from(
         &detail.artifact_state,
         &super::artifact_rules::MapContext {
             coin: run.coin,
+            eligible_items: eligible_collections(run),
             seed: run.seed as u64
                 ^ (run.layer_id as u64).rotate_left(32)
                 ^ (run.node_id as u64).rotate_left(17)
@@ -687,8 +808,36 @@ impl RougeManager {
             return Err(AppError::InvalidRequest);
         }
         run.choices = serde_json::to_string(&chosen)?;
+        if let Some(super::special_events::ChoiceAction::ChangeCurrentEvent { .. }) =
+            super::special_events::choice_action(event, choice_id)
+        {
+            let mut graph: map::LayerMap = serde_json::from_str(&run.graph)?;
+            super::special_events::transition_current(tables, &mut graph, node, choice_id)
+                .map_err(|_| AppError::InvalidRequest)?
+                .ok_or(AppError::InvalidRequest)?;
+            chosen.remove(&node.to_string());
+            run.choices = serde_json::to_string(&chosen)?;
+            let mut finished: Vec<i32> = json_ids(&run.finished);
+            finished.retain(|id| *id != node);
+            run.finished = serde_json::to_string(&finished)?;
+            run.graph = serde_json::to_string(&graph)?;
+            run.battle_interactive.clear();
+            run.interactive_index = -1;
+            run.interactive_refresh = 0;
+            run.retry_num = 0;
+            save_action(db, &expected, &mut run).await?;
+            return Ok(map_info(&run));
+        }
         run.battle_interactive = choice.interactive.clone();
         run.interactive_refresh = 0;
+        match super::special_events::choice_action(event, choice_id) {
+            Some(super::special_events::ChoiceAction::Reward(reward)) => {
+                apply_special_reward(&mut run, reward)?;
+                run.battle_interactive.clear();
+            }
+            Some(super::special_events::ChoiceAction::Finish) => run.battle_interactive.clear(),
+            _ => {}
+        }
         // Observed 3.9 choice cost differs from the unlock threshold (100).
         if choice_id == 10611002 {
             if run.coin < 60 {
@@ -705,6 +854,7 @@ impl RougeManager {
                 gained_coin: (run.coin - expected.coin).max(0),
                 spent_coin: (expected.coin - run.coin).max(0),
                 gained_power: (run.power - expected.power).max(0),
+                spent_power: (expected.power - run.power).max(0),
                 collections: collection_counts(&serde_json::from_str(&run.bag)?)
                     .values()
                     .sum::<i32>()
@@ -846,9 +996,14 @@ impl RougeManager {
                 apply_automatic_drop(&mut run, row.id)?;
             } else if talent.id == 113 {
                 let mut bag: bag::RunBag = serde_json::from_str(&run.bag)?;
-                let item_id =
-                    last_reward_drop(config::configs::get(), 5, run.seed as u64, index as u64)
-                        .ok_or(AppError::InvalidRequest)?;
+                let item_id = last_reward_drop(
+                    config::configs::get(),
+                    5,
+                    run.seed as u64,
+                    index as u64,
+                    eligible_collections(&run).as_ref(),
+                )
+                .ok_or(AppError::InvalidRequest)?;
                 let item = bag.add(item_id)?;
                 let _ = bag.place(item.uid, -1, -1, 0);
                 run.bag = serde_json::to_string(&bag)?;
@@ -909,6 +1064,23 @@ pub fn apply_effect(run: &mut RougeRun, effect_id: i32) -> Result<(), AppError> 
         .rouge_effect
         .get(effect_id)
         .ok_or(AppError::InvalidRequest)?;
+    if effect.r#type == 30 {
+        let mut detail = details(run);
+        super::special_events::queue_effect(
+            tables,
+            &mut detail.special_events,
+            super::special_events::EffectSource {
+                layer_id: run.layer_id,
+                node_id: run.node_id,
+                origin_id: effect_id,
+            },
+            effect_id,
+        )
+        .map_err(|_| AppError::InvalidRequest)?;
+        run.details = serde_json::to_string(&detail)?;
+        place_special_events(run)?;
+        return Ok(());
+    }
     let value = effect.type_param.parse::<i32>().ok();
     match (effect.r#type, value) {
         (13, Some(id)) if collection_shapes::get(id).is_some() => {

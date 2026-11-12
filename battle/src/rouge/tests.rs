@@ -241,7 +241,7 @@ fn aid_cast_drives_round_end_marionette_shield_once_and_preserves_old_shield() {
 }
 
 #[test]
-fn unsupported_serum_kill_cards_are_not_added_to_stall_the_next_round() {
+fn serum_kill_states_wait_for_round_start_card_generation() {
     let (mut managers, pool, catalog, mut random) = fixture(Some(context(&[8210045])));
     run(
         &mut managers,
@@ -254,8 +254,9 @@ fn unsupported_serum_kill_cards_are_not_added_to_stall_the_next_round() {
             target_uid: -1,
         }))],
     );
-    assert!(!managers.buff.has_buff_id(10, 90331));
-    assert!(!managers.buff.has_buff_id(10, 90082));
+    assert!(managers.buff.has_buff_id(10, 90331));
+    assert!(managers.buff.has_buff_id(10, 90082));
+    assert!(managers.card.hand().is_empty());
     assert!(!managers.buff.has_buff_id(11, 90331));
     assert!(!managers.buff.has_buff_id(-1, 90082));
 }

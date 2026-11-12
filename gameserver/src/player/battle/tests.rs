@@ -257,12 +257,15 @@ fn rouge_checkpoint_freezes_attributes_and_context_when_the_bag_changes() {
             sqlx::query("INSERT INTO users (id,username,created_at,updated_at) VALUES (9,'rouge-reconnect',0,0)").execute(&pool).await.unwrap();
             database::db::starter_data::load_all_starter_data(&pool,9).await.unwrap();
             // Starter progression does not grant an owned hero roster.
-            sqlx::query("INSERT INTO heroes (uid,user_id,hero_id,create_time,level,exp,rank,breakthrough,skin,faith,active_skill_level,ex_skill_level) VALUES (9003003,9,3003,0,1,0,1,0,0,0,1,0)").execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO heroes (uid,user_id,hero_id,create_time,level,exp,rank,breakthrough,skin,faith,active_skill_level,ex_skill_level) VALUES (9003003,9,3003,0,1,0,1,0,0,0,1,0),(9003051,9,3051,0,1,0,1,0,0,0,1,0)").execute(&pool).await.unwrap();
             let hero=3003;
             let uid:i64=sqlx::query_scalar("SELECT uid FROM heroes WHERE user_id=9 AND hero_id=?").bind(hero).fetch_one(&pool).await.unwrap();
             let manager=crate::logic::rouge::RougeManager::new(9);
             manager.select_difficulty(&pool,1,1,&[],false).await.unwrap();manager.select_style(&pool,1,1).await.unwrap();
-            manager.select_heroes(&pool,1,&[hero],0).await.unwrap();
+            manager.select_heroes(&pool,1,&[hero,3051],0).await.unwrap();
+            manager.group_change(&pool,1,&[sonettobuf::RougeBattleHero {
+                index:Some(1),hero_id:Some(hero),support_hero_id:Some(3051),support_hero_skill:Some(1),..Default::default()
+            }]).await.unwrap();
             let before=database::db::game::rouge::get_run(&pool,9,1).await.unwrap().unwrap();
             let mut after=before.clone();let mut bag=crate::logic::rouge::bag::RunBag::from_layout("8#8","").unwrap();
             let heart=bag.add(8330020).unwrap();bag.place(heart.uid,0,0,0).unwrap();
@@ -274,12 +277,22 @@ fn rouge_checkpoint_freezes_attributes_and_context_when_the_bag_changes() {
                 fight_group:Some(sonettobuf::FightGroup {hero_list:vec![uid],..Default::default()}),..Default::default()
             }).await.unwrap();
             assert!(active.rouge_snapshot.as_ref().unwrap().context.as_ref().unwrap().extra_attributes.contains(&(uid,217,1000)));
+            let supports=&active.rouge_snapshot.as_ref().unwrap().context.as_ref().unwrap().support_skills;
+            assert_eq!(supports.len(),1);assert_eq!(supports[0].owner_uid,uid);assert_eq!(supports[0].hero_id,3051);
+            assert_eq!(supports[0].skill_ids,::battle::hero::active_skills(config::configs::get(),3051,1,0).0);
+            let initial_fight=&active.rouge_snapshot.as_ref().unwrap().fight;
+            let ex=initial_fight.attacker.as_ref().unwrap().ex_team_str.as_deref().unwrap();
+            let projected:serde_json::Value=serde_json::from_str(ex.split('#').nth(3).unwrap()).unwrap();
+            assert_eq!(projected[uid.to_string()]["skill1"],serde_json::json!(supports[0].skill_ids));
             active.activate(&pool,9,&RewardSet::default()).await.unwrap();
             let expected=active.reconnect_reply();let start=active.start_reply();let cards=active.card_info_push();
             let before=database::db::game::rouge::get_run(&pool,9,1).await.unwrap().unwrap();let mut after=before.clone();
             bag.remove(heart.uid).unwrap();let basket=bag.add(8320049).unwrap();bag.place(basket.uid,0,0,0).unwrap();
             after.bag=serde_json::to_string(&bag).unwrap();after.coin=10000;
             crate::logic::rouge::flow::save_action(&pool,&before,&mut after).await.unwrap();
+            manager.group_change(&pool,1,&[sonettobuf::RougeBattleHero {
+                index:Some(1),hero_id:Some(hero),support_hero_id:Some(3051),support_hero_skill:Some(2),..Default::default()
+            }]).await.unwrap();
             let record=battle::load_active_fight(&pool,9).await.unwrap().unwrap();
             let restored=ActiveBattle::restore(&pool,9,record).await.unwrap();
             assert_eq!(restored.reconnect_reply(),expected);assert_eq!(restored.start_reply(),start);assert_eq!(restored.card_info_push(),cards);

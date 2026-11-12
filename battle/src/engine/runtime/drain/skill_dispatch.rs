@@ -21,6 +21,14 @@ pub(super) fn drain_skill(
     subscriber: Option<SubscriberContext>,
     caster_frame: Option<FrameOwner>,
 ) -> Result<(), DrainError> {
+    let support_pool = crate::rouge::support_target_pool(
+        managers,
+        pool,
+        invocation.plan.source_uid,
+        invocation.plan.skill_id,
+        invocation.card_index,
+    );
+    let pool = support_pool.as_deref().unwrap_or(pool);
     // After terminal commitment, skip active skills that have not
     // started a frame. Existing-frame continuations may finish settling.
     if matches!(trigger, SkillOpTrigger::Active)
@@ -92,6 +100,22 @@ pub(super) fn drain_skill(
         }),
         &trigger,
     );
+    if managers.rouge.context().is_some()
+        && let Some(hero_id) = managers
+            .card
+            .played()
+            .iter()
+            .find(|played| {
+                played.caster_uid == invocation.plan.source_uid
+                    && played.card_index == invocation.card_index
+                    && played.skill_id == invocation.plan.skill_id
+                    && matches!(played.card.card_type, Some(2 | 3))
+            })
+            .and_then(|played| played.card.hero_id)
+        && hero_id > 0
+    {
+        crate::engine::runtime::record::set_support_hero(&mut result.frames, &frame_path, hero_id);
+    }
     if matches!(trigger, SkillOpTrigger::Event(_))
         && let Some(action_path) = active_skill_scope_path(&result.frames, &frame_path)
         && let FrameOwner::Skill {

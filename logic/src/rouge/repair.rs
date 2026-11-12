@@ -34,6 +34,7 @@ fn stock(run: &RougeRun, index: i32, refresh: i32) -> BTreeMap<i32, i32> {
             ^ (refresh as u64).wrapping_mul(7919),
     );
     let tables = config::configs::get();
+    let eligible = flow::eligible_collections(run);
     let mut rows: Vec<_> = tables
         .rouge_repair_shop
         .iter()
@@ -41,6 +42,9 @@ fn stock(run: &RougeRun, index: i32, refresh: i32) -> BTreeMap<i32, i32> {
             row.season == 1
                 && row.consume == "1#200|2#200"
                 && artifact_rules::base_item_ids().contains(&row.collection_id)
+                && eligible
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&row.collection_id))
         })
         .collect();
     rows.shuffle(&mut rng);
@@ -291,11 +295,13 @@ impl RougeManager {
         // uniformly from other non-unique base items of the same rarity.
         let rare =
             artifact_rules::collection_rarity(item.item_id).ok_or(AppError::InvalidRequest)?;
+        let eligible = flow::eligible_collections(&run);
         let pool: Vec<_> = artifact_rules::base_item_ids()
             .iter()
             .copied()
             .filter(|id| {
                 *id != item.item_id
+                    && eligible.as_ref().is_none_or(|ids| ids.contains(id))
                     && !collection_shapes::is_unique(*id)
                     && artifact_rules::collection_rarity(*id) == Some(rare)
             })

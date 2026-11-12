@@ -63,7 +63,7 @@ pub fn subscriber_rule_ops(
 }
 
 pub fn supports_hero_skill(args: &[i32]) -> bool {
-    matches!(args, [group, rank, 1] if matches!(group, 1 | 2) && (1..=3).contains(rank))
+    matches!(args, [group, rank, 1] if matches!(group, 0 | 1 | 2) && (1..=3).contains(rank))
 }
 
 pub fn supports_configured_skill3(args: &[i32]) -> bool {
@@ -94,6 +94,7 @@ pub fn hero_skill_subscriber_rule_ops(
     pool: &TargetPool,
     subscriber: &BuffActSubscriber,
     event: &BattleEvent,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
 ) -> Option<Vec<super::BuffActRuleOp>> {
     if !super::subscriber_is_kind(subscriber, BuffActKind::CreateHeroTempCards)
         || !matches!(event, BattleEvent::Kind(EventKind::RoundStartCard))
@@ -105,22 +106,46 @@ pub fn hero_skill_subscriber_rule_ops(
         return None;
     };
     let owner = pool.entity(subscriber.owner_uid)?;
-    let skills = if *group == 1 {
-        &owner.skill_group1
+    let candidates = [(1, &owner.skill_group1), (2, &owner.skill_group2)]
+        .into_iter()
+        .filter(|(id, _)| *group == 0 || *id == *group)
+        .filter_map(|(_, skills)| {
+            skills
+                .iter()
+                .copied()
+                .find(|id| pool.catalog().skill_rank(*id) == *rank)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut result = Vec::new();
+    let mut removal = None;
+    // Preserve the existing fixed-group route; only the newly supported
+    // random-group anticipation expands its stack count here.
+    let count = if *group == 0 {
+        subscriber.amount.max(0)
     } else {
-        &owner.skill_group2
+        1
     };
-    let skill_id = skills
-        .iter()
-        .copied()
-        .find(|skill_id| pool.catalog().skill_rank(*skill_id) == *rank)?;
-    temporary_card_rule_ops(
-        subscriber,
-        skill_id,
-        None,
-        i64::from(owner.model_id),
-        TemporaryCardKind::HeroSkill,
-    )
+    for _ in 0..count {
+        let index = if *group == 0 {
+            determinism.lua_random_index(candidates.len())?
+        } else {
+            0
+        };
+        let mut ops = temporary_card_rule_ops(
+            subscriber,
+            candidates[index],
+            None,
+            i64::from(owner.model_id),
+            TemporaryCardKind::HeroSkill,
+        )?;
+        removal = ops.pop();
+        result.extend(ops);
+    }
+    result.push(removal?);
+    Some(result)
 }
 
 fn temporary_card_rule_ops(
@@ -279,6 +304,7 @@ mod tests {
             &pool,
             &subscriber,
             &BattleEvent::Kind(EventKind::RoundStartCard),
+            &mut crate::engine::runtime::determinism::RoundDeterminism::with_seed(42),
         )
         .unwrap();
 
@@ -289,7 +315,7 @@ mod tests {
                     && add.target_uid == 10
                     && add.reserve_id == 3070
         ));
-        assert!(!supports_hero_skill(&[0, 2, 1]));
+        assert!(supports_hero_skill(&[0, 2, 1]));
         assert!(!supports_hero_skill(&[1, 2, 2]));
     }
 

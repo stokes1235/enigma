@@ -28,6 +28,47 @@ async fn started(all_growth: bool) -> (SqlitePool, RougeManager) {
 }
 
 #[tokio::test]
+async fn real_drop_candidates_use_the_run_growth_snapshot_and_keep_legacy_policy() {
+    let tables = {
+        init_config();
+        config::configs::get()
+    };
+    let locked: HashSet<i32> = tables
+        .rouge_collection_unlock
+        .iter()
+        .filter(|row| row.unlock_type == 9 && row.unlock_param == "401")
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(locked.len(), 36);
+    for growth in [false, true] {
+        let (db, _) = started(growth).await;
+        let mut run = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
+        let mut found_locked = false;
+        if !growth {
+            // Activating growth after entering must not change this run's
+            // frozen candidates; only the next run receives the expanded pool.
+            rouge::insert_genius(&db, 1, 1, 401).await.unwrap();
+        }
+        for seed in 0..128 {
+            run.seed = seed;
+            for drop in [1001, 1003, 1009] {
+                if let Some(candidates) = drop_state(&run, drop, tables) {
+                    found_locked |= candidates.offers.iter().any(|id| locked.contains(id));
+                    if !growth {
+                        assert!(!candidates.offers.iter().any(|id| locked.contains(id)));
+                    }
+                }
+            }
+        }
+        assert_eq!(found_locked, growth);
+        let mut detail = flow::details(&run);
+        detail.collection_pool_version = 0;
+        run.details = serde_json::to_string(&detail).unwrap();
+        assert!(flow::eligible_collections(&run).is_none());
+    }
+}
+
+#[tokio::test]
 async fn growth_initial_resources_and_frozen_battle_rewards_are_applied_once() {
     let (db, manager) = started(true).await;
     let expected = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
@@ -224,12 +265,7 @@ async fn recruitment_returns_safe_zone_healing_and_recovery_without_reapplying_i
     run.power = 0;
     run.battle_interactive = "5".into();
     run.interactive_index = 0;
-    // Graph is fixed by run generation; update the test fixture separately.
-    sqlx::query("UPDATE user_rouge_run SET graph=? WHERE user_id=1 AND season=1")
-        .bind(&run.graph)
-        .execute(&db)
-        .await
-        .unwrap();
+    // The complete optimistic save now commits the graph with the action.
     flow::save(&db, &expected, &run).await.unwrap();
     let (team, map) = manager.recruit_heroes(&db, 1, &[]).await.unwrap();
     assert!(map.middle_layer_info.is_some());
@@ -313,14 +349,38 @@ async fn old_run_actions_and_repeated_layer_transitions_preserve_the_new_state()
         position_index: 0,
     };
     assert!(
-        rouge::advance_run_layer(&db, 1, 1, &before, &next, &before.graph, 1, 2, 0, 4)
-            .await
-            .unwrap()
+        rouge::advance_run_layer(
+            &db,
+            1,
+            1,
+            &before,
+            &next,
+            &before.graph,
+            &before.details,
+            1,
+            2,
+            0,
+            4
+        )
+        .await
+        .unwrap()
     );
     assert!(
-        !rouge::advance_run_layer(&db, 1, 1, &before, &next, &before.graph, 1, 2, 0, 4)
-            .await
-            .unwrap()
+        !rouge::advance_run_layer(
+            &db,
+            1,
+            1,
+            &before,
+            &next,
+            &before.graph,
+            &before.details,
+            1,
+            2,
+            0,
+            4
+        )
+        .await
+        .unwrap()
     );
     let after = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
     assert_eq!(

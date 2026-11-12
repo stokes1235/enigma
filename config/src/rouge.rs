@@ -117,6 +117,23 @@ impl GameDB {
     /// `rouge_choice` has no `eventId` column: the event id is encoded in the
     /// choice id (`10510101 -> 105101`), which matches 529/533 shipped rows.
     pub fn rouge_choices_for_event(&self, event_id: i32) -> Vec<&RougeChoice> {
+        // Nested story phases use explicit menu IDs: the second phase has an
+        // extra digit, and cannot be grouped by choice.id / 100.
+        let phase: Option<&[i32]> = match event_id {
+            106141 => Some(&[10614101, 10614102]),
+            106151 => Some(&[10615101, 10615102]),
+            1061511 => Some(&[10615111, 10615112]),
+            106152 => Some(&[10615201, 10615202]),
+            1061521 => Some(&[10615211, 10615212]),
+            106153 => Some(&[10615301, 10615302]),
+            _ => None,
+        };
+        if let Some(ids) = phase {
+            return ids
+                .iter()
+                .filter_map(|id| self.rouge_choice.get(*id))
+                .collect();
+        }
         // Treasure and respite encounters share their menu across many event
         // ids. The 3.9 trace includes e.g. 105030 -> 10510101 and
         // 108014 -> 10810105; their ids do not encode an individual menu.

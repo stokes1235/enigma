@@ -13,12 +13,17 @@ mod extended_integration;
 pub mod extra_rewards;
 #[cfg(test)]
 mod extra_rewards_integration;
+pub mod favorites;
 pub mod flow;
 pub mod genius_bonuses;
 pub mod map;
 pub mod middle;
+pub mod outside_rewards;
 pub mod repair;
 pub mod shop;
+pub mod special_events;
+#[cfg(test)]
+mod special_events_integration;
 
 use crate::error::AppError;
 use database::db::game::rouge;
@@ -318,7 +323,7 @@ impl RougeManager {
                 || !roster.contains(&hero_id)
                 || !used_heroes.insert(hero_id)
                 || (equip_uid != 0 && !owned_equipment.contains(&equip_uid))
-                || support_hero_skill < 0
+                || !(0..=3).contains(&support_hero_skill)
             {
                 return Err(AppError::InvalidRequest);
             }
@@ -427,11 +432,20 @@ impl RougeManager {
         detail.battle_reward = None;
         let start = load_original(db, self.player_id, season).await?;
         if target.node_type == map::NODE_SHOP {
+            let eligible = flow::eligible_collections(&run);
             next.shop = serde_json::to_string(&shop::generate(
                 run.layer_id,
                 target.node_id,
                 run.seed as u64,
-                tables.rouge_goods.iter().cloned(),
+                tables
+                    .rouge_goods
+                    .iter()
+                    .filter(|row| {
+                        eligible
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&row.creator))
+                    })
+                    .cloned(),
             ))?;
             let tree = flow::talent_tree(&start, &run);
             for index in detail.active_talents.clone() {
@@ -572,6 +586,13 @@ impl RougeManager {
                 }
                 state.entrust_id = id;
                 state.entrust_progress = 0;
+                if tables
+                    .rouge_effect
+                    .get(id)
+                    .is_some_and(|effect| effect.r#type == 30)
+                {
+                    flow::apply_effect(&mut next_run, id)?;
+                }
                 piece.select_id = Some(selection);
                 piece.finish = Some(true);
                 id
@@ -696,7 +717,16 @@ impl RougeManager {
             return Err(AppError::InvalidRequest);
         }
 
-        let layer_map = generate_layer(next_layer, run.seed as u64 + run.layer_index as u64 + 1);
+        let history = flow::details(&run).passed_endings.unwrap_or_default();
+        let owned: Vec<_> = artifact_lifecycle::owned(&serde_json::from_str(&run.bag)?)
+            .into_values()
+            .collect();
+        let layer_map = generate_layer(
+            next_layer,
+            run.seed as u64 + run.layer_index as u64 + 1,
+            &history,
+            &owned,
+        );
         let start_node = layer_map
             .start_node()
             .ok_or(AppError::InvalidRequest)?
@@ -711,6 +741,14 @@ impl RougeManager {
             middle_layer_id: 0,
             position_index: 0,
         };
+        let mut next = run.clone();
+        next.graph = graph;
+        next.layer_id = next_layer;
+        next.node_id = start_node.node_id;
+        next.map_type = MAP_TYPE_NORMAL;
+        next.choices = "{}".into();
+        next.finished = "[]".into();
+        flow::place_special_events(&mut next)?;
         let stats = current_layer_stats(&run)?;
         if !rouge::advance_run_layer(
             db,
@@ -718,7 +756,8 @@ impl RougeManager {
             season,
             &run,
             &position,
-            &graph,
+            &next.graph,
+            &next.details,
             stats.minor,
             stats.danger,
             stats.crisis,
@@ -750,12 +789,21 @@ impl RougeManager {
             .filter(|shop| shop.node_id == node_id)
             .map(|shop| shop.refresh_num.saturating_add(1))
             .unwrap_or(1);
+        let eligible = flow::eligible_collections(&run);
         let stock = shop::generate_for_refresh(
             run.layer_id,
             node_id,
             run.seed as u64,
             refresh_num,
-            tables.rouge_goods.iter().cloned(),
+            tables
+                .rouge_goods
+                .iter()
+                .filter(|row| {
+                    eligible
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&row.creator))
+                })
+                .cloned(),
         );
         let cost = shop::refresh_price(tables, refresh_num.saturating_sub(1));
         if run.coin < cost {
@@ -1904,6 +1952,7 @@ pub async fn rouge_outside_info(
     let cleared = rouge::cleared_difficulties(db, user_id, season).await?;
     let passed_endings =
         database::db::game::rouge_history::passed_endings(db, user_id, season).await?;
+    let favorites = favorites::load(db, user_id, season).await?;
     let cached: Option<String> = sqlx::query_scalar(
         "SELECT result_info FROM user_rouge_settlement WHERE user_id = ? AND season = ?",
     )
@@ -1923,12 +1972,14 @@ pub async fn rouge_outside_info(
             genius_ids,
             point: Some(outside.point),
             have_get_point: Some(outside.have_get_point),
-            bonus: Some(RougeOutsideBonusNo::default()),
+            bonus: Some(outside_rewards::bonus_info(db, user_id, season).await?),
             review: review.clone(),
             game_record_info: Some(RougeGameRecordInfo {
                 pass_entrust_id,
                 max_difficulty: Some(cleared.into_iter().max().unwrap_or(0)),
                 pass_end_id: passed_endings,
+                pass_collections: favorites.pass_collections,
+                unlock_story_ids: favorites.unlock_story_ids,
                 ..Default::default()
             }),
             is_genius_new_stage: Some(false),
@@ -2458,6 +2509,7 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
     let mut offers = Vec::new();
     let refresh = run.interactive_refresh.max(0) as u64;
     let reward = flow::reward(run, drop_id);
+    let eligible = flow::eligible_collections(run);
     let last_entry = row.drop.split('|').count().saturating_sub(1);
     for (entry_index, entry) in row.drop.split('|').enumerate() {
         let mut fields = entry.split('#');
@@ -2487,6 +2539,7 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
                     group_id,
                     run.seed as u64,
                     base_salt.wrapping_add((attempt as u64).wrapping_mul(7_919)),
+                    eligible.as_ref(),
                 )?;
                 if !offers.contains(&item) || attempt + 1 == rows.max(1) {
                     selected = Some(item);
@@ -2501,7 +2554,11 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
         let mut pool: Vec<i32> = artifact_rules::base_item_ids()
             .iter()
             .copied()
-            .filter(|id| collection_shapes::is_enchant_item(*id) && !offers.contains(id))
+            .filter(|id| {
+                collection_shapes::is_enchant_item(*id)
+                    && !offers.contains(id)
+                    && eligible.as_ref().is_none_or(|ids| ids.contains(id))
+            })
             .collect();
         let mut rng = rand::rngs::StdRng::seed_from_u64(
             run.seed as u64
@@ -3082,7 +3139,12 @@ fn middle_board(tables: &config::GameDB, layer_id: i32) -> Result<middle::Middle
 }
 
 /// Generates a layer map with the configured stage count.
-fn generate_layer(layer_id: i32, seed: u64) -> map::LayerMap {
+fn generate_layer(
+    layer_id: i32,
+    seed: u64,
+    passed_endings: &[i32],
+    owned: &[i32],
+) -> map::LayerMap {
     let tables = config::configs::get();
     // Captured base route: 5/6/7/8/6 columns, including the starting point.
     // Parallel areas share the count; their unrecorded distributions are seeded
@@ -3097,6 +3159,9 @@ fn generate_layer(layer_id: i32, seed: u64) -> map::LayerMap {
         _ => map::DEFAULT_STAGES,
     };
     let mut pool = event_pool(tables);
+    for events in pool.values_mut() {
+        events.retain(|id| special_events::can_spawn_randomly(tables, *id, passed_endings, owned));
+    }
     for kind in [1, 2, 3, 4] {
         if let Some(events) = pool.get_mut(&kind) {
             let local: Vec<i32> = events
@@ -3251,8 +3316,18 @@ fn const_i32(tables: &config::GameDB, id: i32, fallback: i32) -> i32 {
         .unwrap_or(fallback)
 }
 
-fn last_reward_drop(tables: &config::GameDB, group_id: i32, seed: u64, salt: u64) -> Option<i32> {
-    let rows: Vec<_> = tables.rouge_drop_group.by_group(group_id).collect();
+fn last_reward_drop(
+    tables: &config::GameDB,
+    group_id: i32,
+    seed: u64,
+    salt: u64,
+    eligible: Option<&std::collections::BTreeSet<i32>>,
+) -> Option<i32> {
+    let rows: Vec<_> = tables
+        .rouge_drop_group
+        .by_group(group_id)
+        .filter(|row| eligible.is_none_or(|ids| ids.contains(&row.collection_id)))
+        .collect();
     let total: u64 = rows.iter().map(|row| row.rate.max(1) as u64).sum();
     if total == 0 {
         return None;
@@ -3279,6 +3354,7 @@ fn apply_last_reward(
     coin: &mut i32,
     power_limit: &mut i32,
     bag: &mut bag::RunBag,
+    eligible: Option<&std::collections::BTreeSet<i32>>,
 ) -> Result<(), AppError> {
     match reward_id % 10 {
         // Obtain 50 Goldfinch Coins.
@@ -3289,19 +3365,21 @@ fn apply_last_reward(
         }
         // One random Common artefact (`rouge_drop_group` 3).
         3 => {
-            let item = last_reward_drop(tables, 3, seed, 3).ok_or(AppError::InvalidRequest)?;
+            let item =
+                last_reward_drop(tables, 3, seed, 3, eligible).ok_or(AppError::InvalidRequest)?;
             bag.add(item)?;
         }
         // One random Medication (`rouge_drop_group` 1001).
         4 => {
-            let item = last_reward_drop(tables, 1001, seed, 4).ok_or(AppError::InvalidRequest)?;
+            let item = last_reward_drop(tables, 1001, seed, 4, eligible)
+                .ok_or(AppError::InvalidRequest)?;
             bag.add(item)?;
         }
         // Two random Ritual Disks (`rouge_drop_group` 1).
         5 => {
             for salt in [5, 6] {
-                let item =
-                    last_reward_drop(tables, 1, seed, salt).ok_or(AppError::InvalidRequest)?;
+                let item = last_reward_drop(tables, 1, seed, salt, eligible)
+                    .ok_or(AppError::InvalidRequest)?;
                 bag.add(item)?;
             }
         }
@@ -3323,7 +3401,9 @@ async fn start_run(
     let layer_id = const_i32(tables, 47, 111);
     let seed = common::time::ServerTime::now_ms() as u64 ^ (user_id as u64) << 17;
 
-    let layer_map = generate_layer(layer_id, seed);
+    let passed_endings =
+        database::db::game::rouge_history::passed_endings(db, user_id, start.season).await?;
+    let layer_map = generate_layer(layer_id, seed, &passed_endings, &[]);
     let start_node = layer_map
         .start_node()
         .ok_or(AppError::InvalidRequest)?
@@ -3333,6 +3413,9 @@ async fn start_run(
     let style = tables.rouge_style(start.season, start.style);
     let genius_ids = rouge::list_genius(db, user_id, start.season).await?;
     let growth = genius_bonuses::from_ids(tables, &genius_ids);
+    let eligible = favorites::unlock_collection_ids(tables, &genius_ids)
+        .into_iter()
+        .collect();
     let mut coin = style.map(|row| row.coin).unwrap_or_default() + growth.initial_coin;
     let (power, mut power_limit) =
         starting_power(tables, start.season, start.style, start.difficulty);
@@ -3364,6 +3447,7 @@ async fn start_run(
             &mut coin,
             &mut power_limit,
             &mut bag,
+            Some(&eligible),
         )?;
     }
     let bag_json = serde_json::to_string(&bag)?;
@@ -3397,9 +3481,9 @@ async fn start_run(
     let before = run.clone();
     let mut details = flow::details(&run);
     details.outside_genius = Some(genius_ids);
+    details.collection_pool_version = 1;
     details.safe_zone_recovery = style.map(|style| style.power);
-    details.passed_endings =
-        Some(database::db::game::rouge_history::passed_endings(db, user_id, start.season).await?);
+    details.passed_endings = Some(passed_endings);
     run.details = serde_json::to_string(&details)?;
     artifact_lifecycle::initialize(&mut run)?;
     flow::save(db, &before, &run).await?;
@@ -3492,14 +3576,14 @@ mod original_tests {
         let mut coin = 50;
         let mut limit = 40;
         let mut bag = fresh_bag();
-        apply_last_reward(tables, 21, 7, &mut coin, &mut limit, &mut bag).unwrap();
+        apply_last_reward(tables, 21, 7, &mut coin, &mut limit, &mut bag, None).unwrap();
         assert_eq!(coin, 100);
 
         let mut coin = 50;
         let mut limit = 40;
         let mut bag = fresh_bag();
         let initial_len = bag.items.len();
-        apply_last_reward(tables, 22, 7, &mut coin, &mut limit, &mut bag).unwrap();
+        apply_last_reward(tables, 22, 7, &mut coin, &mut limit, &mut bag, None).unwrap();
         assert_eq!(bag.items.len(), initial_len + 1);
         assert_eq!(bag.items.last().unwrap().item_id, 8_130_804);
 
@@ -3507,7 +3591,7 @@ mod original_tests {
             let mut coin = 50;
             let mut limit = 40;
             let mut bag = fresh_bag();
-            apply_last_reward(tables, reward_id, 7, &mut coin, &mut limit, &mut bag).unwrap();
+            apply_last_reward(tables, reward_id, 7, &mut coin, &mut limit, &mut bag, None).unwrap();
             assert_eq!(bag.items.len(), initial_len + 1);
             assert!(collection_shapes::get(bag.items.last().unwrap().item_id).is_some());
         }
@@ -3515,7 +3599,7 @@ mod original_tests {
         let mut coin = 50;
         let mut limit = 40;
         let mut bag = fresh_bag();
-        apply_last_reward(tables, 25, 7, &mut coin, &mut limit, &mut bag).unwrap();
+        apply_last_reward(tables, 25, 7, &mut coin, &mut limit, &mut bag, None).unwrap();
         assert_eq!(bag.items.len(), initial_len + 2);
         assert!(
             bag.items[initial_len..]
@@ -3523,7 +3607,7 @@ mod original_tests {
                 .all(|item| collection_shapes::is_enchant_item(item.item_id))
         );
 
-        apply_last_reward(tables, 36, 7, &mut coin, &mut limit, &mut bag).unwrap();
+        apply_last_reward(tables, 36, 7, &mut coin, &mut limit, &mut bag, None).unwrap();
         assert_eq!(limit, 50);
     }
 

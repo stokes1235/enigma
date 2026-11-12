@@ -90,6 +90,36 @@ pub async fn build_fight(
                     if slot == Some(1) {
                         context.first_slot_uid = Some(uid);
                     }
+                    if let Some(assignment) = team
+                        .battle_hero_list
+                        .iter()
+                        .find(|hero| hero.hero_id == entity.model_id)
+                    {
+                        let support = assignment.support_hero_id.unwrap_or_default();
+                        let group = assignment.support_hero_skill.unwrap_or_default();
+                        let alive = team.hero_life_list.iter().any(|life| {
+                            life.hero_id == Some(support) && life.life.unwrap_or_default() > 0
+                        });
+                        if support > 0 && matches!(group, 1 | 2) && alive {
+                            let (rank, ex_level): (i32, i32) = sqlx::query_as(
+                                "SELECT rank, ex_skill_level FROM heroes WHERE user_id = ? AND hero_id = ?",
+                            ).bind(player_id).bind(support).fetch_one(db).await?;
+                            let (first, second, _) = battle::hero::active_skills(
+                                config::configs::get(),
+                                support,
+                                rank,
+                                ex_level,
+                            );
+                            let skill_ids = if group == 1 { first } else { second };
+                            if !skill_ids.is_empty() {
+                                context.support_skills.push(battle::rouge::SupportSkill {
+                                    owner_uid: uid,
+                                    hero_id: support,
+                                    skill_ids,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -136,6 +166,35 @@ pub async fn build_fight(
                     value: rule.value,
                 })
                 .collect();
+        if let Some(attacker) = &mut built.fight.attacker {
+            // FightHelper uses the fourth '#' segment for support-card rank
+            // transitions. Keys are the deployed owners; expose their selected
+            // support group's actual replacement-aware skill sequence.
+            let mut skills = serde_json::Map::new();
+            for support in &context.support_skills {
+                let group = team
+                    .battle_hero_list
+                    .iter()
+                    .find(|slot| slot.support_hero_id == Some(support.hero_id))
+                    .and_then(|slot| slot.support_hero_skill)
+                    .unwrap_or(1);
+                skills.insert(
+                    support.owner_uid.to_string(),
+                    if group == 2 {
+                        serde_json::json!({"skill2": support.skill_ids})
+                    } else {
+                        serde_json::json!({"skill1": support.skill_ids})
+                    },
+                );
+            }
+            attacker.ex_team_str = Some(format!(
+                "{}#{}#{}#{}",
+                run.coin,
+                run.power,
+                run.power_limit,
+                serde_json::Value::Object(skills)
+            ));
+        }
         built.rouge = Some(context);
         if !unsupported.is_empty() {
             tracing::debug!(?unsupported, "unsupported Rouge numeric attribute fields");

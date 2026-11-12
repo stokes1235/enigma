@@ -107,6 +107,7 @@ pub enum BuffActKind {
     AddPassiveSkillByLayer,
     AddSplitEmitterNum,
     AddSpTempCard,
+    AddSupportCard,
     AddToBuffEntity,
     AddToBuffEntity2,
     AddBuffAfterAttack,
@@ -751,9 +752,13 @@ buff_act_definitions! {
         supports: super::attr_by_skill_target_count::supports, state_consumer: true,
         wire: (super::wire::BuffActWireDefinition::all(DefinitionKey::new(107, "AttrSkillMultiple"), &[EffectType::None as i32]));
     (739, "CreateHeroTempCards") => CreateHeroTempCards,
-        scoped_runtime: |context| super::add_sp_temp_card::hero_skill_subscriber_rule_ops(context.pool, context.subscriber, context.event?),
+        scoped_runtime: |context| super::add_sp_temp_card::hero_skill_subscriber_rule_ops(context.pool, context.subscriber, context.event?,context.determinism),
         supports: super::add_sp_temp_card::supports_hero_skill,
         wire: (super::wire::BuffActWireDefinition::all(DefinitionKey::new(739, "CreateHeroTempCards"), &[EffectType::None as i32]));
+    (783, "AddSupportCard") => AddSupportCard,
+        scoped_runtime: |context| super::add_support_card::subscriber_rule_ops(context),
+        supports: super::add_support_card::supports,
+        wire: (super::wire::BuffActWireDefinition::all(DefinitionKey::new(783, "AddSupportCard"), &[EffectType::None as i32]));
     (10015, "CreateTempSkill3Card") => CreateTempSkill3Card,
         scoped_runtime: |context| super::add_sp_temp_card::configured_skill3_subscriber_rule_ops(
             context.subscriber,

@@ -72,7 +72,7 @@ async fn captured_clear(db: &SqlitePool) -> RougeRun {
 async fn second_area_failure_counts_one_cleared_area_and_spends_two_favors() {
     let (db, manager) = started().await;
     let run = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
-    let graph = super::generate_layer(122, run.seed as u64);
+    let graph = super::generate_layer(122, run.seed as u64, &[], &[]);
     let first = graph.start_node().unwrap();
     sqlx::query("UPDATE user_rouge_run SET layer_index = 1, layer_id = 122, stage = ?, node_id = ?, graph = ?, map_type = 1 WHERE user_id = 1 AND season = 1")
         .bind(first.stage).bind(first.node_id).bind(serde_json::to_string(&graph).unwrap())

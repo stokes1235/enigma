@@ -55,12 +55,16 @@ pub enum MapTrigger {
     Lose(i64),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MapContext {
     /// Coin balance before this event, especially before acquisition grants.
     pub coin: i32,
     /// Stable per-action seed; repeated evaluation must use the same value.
     pub seed: u64,
+    /// Availability/drop-pool snapshot from outside Genius unlock rules.
+    /// Production callers pass Some, even for an empty pool. None preserves
+    /// standalone rule evaluation and legacy tests; it is not a full unlock.
+    pub eligible_items: Option<BTreeSet<i32>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,10 +511,9 @@ pub fn evaluate_battle_with_state(
                 item,
                 "safe-zone coins supported; entry spending/Blessing needs combat support",
             )),
-            8210045 => result.unsupported.push(unsupported(
-                item,
-                "safe-zone healing supported; on-kill statuses need combat support",
-            )),
+            // The combat runtime grants the verified anticipation states and
+            // generates own/support cards at their next real trigger.
+            8210045 => {}
             _ => result.unsupported.push(unsupported(
                 item,
                 "scripted artefact effect not yet implemented",
@@ -576,6 +579,7 @@ fn random_reward(
     bag: &RunBag,
     grants: &[i32],
     tag: i32,
+    eligible: Option<&BTreeSet<i32>>,
     seed: &mut u64,
 ) -> Option<i32> {
     let owned: BTreeSet<_> = bag
@@ -588,6 +592,7 @@ fn random_reward(
         .rouge_collection_unlock
         .iter()
         .map(|row| row.id)
+        .filter(|id| eligible.is_none_or(|pool| pool.contains(id)))
         .filter(|id| {
             geometry::get(*id)
                 .is_some_and(|meta| (1..=3).contains(&meta.rarity) && meta.tags.contains(&tag))
@@ -662,15 +667,28 @@ pub fn evaluate_map_with_context(
             (true, 8330615) => result.coin += if context.coin < 200 { 200 } else { 100 },
             (true, 8330708) => {
                 for _ in 0..2 {
-                    if let Some(id) = random_reward(tables, bag, &result.grant_items, 7, &mut seed)
-                    {
+                    if let Some(id) = random_reward(
+                        tables,
+                        bag,
+                        &result.grant_items,
+                        7,
+                        context.eligible_items.as_ref(),
+                        &mut seed,
+                    ) {
                         result.grant_items.push(id);
                     }
                 }
             }
             (true, 8330817) => {
                 result.grant_items.push(8130804);
-                if let Some(id) = random_reward(tables, bag, &result.grant_items, 8, &mut seed) {
+                if let Some(id) = random_reward(
+                    tables,
+                    bag,
+                    &result.grant_items,
+                    8,
+                    context.eligible_items.as_ref(),
+                    &mut seed,
+                ) {
                     result.grant_items.push(id);
                 }
             }
@@ -752,7 +770,14 @@ pub fn evaluate_map_with_context(
                 result.power += 5 + enhancement + resonance;
             }
             (MapTrigger::BattleWin, 8330002) => {
-                if let Some(id) = random_reward(tables, bag, &result.grant_items, 105, &mut seed) {
+                if let Some(id) = random_reward(
+                    tables,
+                    bag,
+                    &result.grant_items,
+                    105,
+                    context.eligible_items.as_ref(),
+                    &mut seed,
+                ) {
                     result.grant_items.push(id);
                 }
             }
@@ -1116,7 +1141,11 @@ mod tests {
     #[test]
     fn lifecycle_coin_grants_use_real_ownership_and_are_idempotent_after_reload() {
         let layout = bag(vec![item(10, 8230606, -1, -1), item(20, 8330615, -1, -1)]);
-        let context = MapContext { coin: 199, seed: 7 };
+        let context = MapContext {
+            coin: 199,
+            seed: 7,
+            ..Default::default()
+        };
         let initial = MapState::default();
         let cup = evaluate_map_with_context(
             tables(),
@@ -1154,7 +1183,7 @@ mod tests {
         );
         let threshold = MapContext {
             coin: 200,
-            ..context
+            ..context.clone()
         };
         assert_eq!(
             evaluate_map_with_context(
@@ -1190,7 +1219,11 @@ mod tests {
             item(2, 8330817, -1, -1),
             item(3, 8130804, -1, -1),
         ]);
-        let context = MapContext { coin: 0, seed: 91 };
+        let context = MapContext {
+            coin: 0,
+            seed: 91,
+            ..Default::default()
+        };
         let rosetta = evaluate_map_with_context(
             tables(),
             &layout,
@@ -1365,7 +1398,11 @@ mod tests {
                 &layout,
                 MapTrigger::EnterBattle,
                 &MapState::default(),
-                &MapContext { coin: 0, seed },
+                &MapContext {
+                    coin: 0,
+                    seed,
+                    ..Default::default()
+                },
             );
             assert_eq!(
                 effect.power, 7,
@@ -1401,6 +1438,93 @@ mod tests {
                 &layout,
                 MapTrigger::EnterBattle,
                 &MapState::default()
+            )
+            .grant_items
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn real_random_grants_obey_genius_401_pool_and_unlocked_items_become_drawable() {
+        let tables = tables();
+        let locked: BTreeSet<_> = crate::rouge::favorites::unlock_collection_ids(tables, &[])
+            .into_iter()
+            .collect();
+        let unlocked: BTreeSet<_> = crate::rouge::favorites::unlock_collection_ids(tables, &[401])
+            .into_iter()
+            .collect();
+        let gated_disks = BTreeSet::from([8140401, 8140501, 8240402, 8240502]);
+        let notebook = bag(vec![item(1, 8330002, 0, 0)]);
+        let rosetta = bag(vec![item(1, 8330708, -1, -1)]);
+        let mut drawn_after_unlock = BTreeSet::new();
+        let mut saw_locked_extra_action_after_unlock = false;
+        for seed in 0..256 {
+            for (is_unlocked, pool) in [(false, &locked), (true, &unlocked)] {
+                let context = MapContext {
+                    coin: 0,
+                    seed,
+                    eligible_items: Some(pool.clone()),
+                };
+                let disk = evaluate_map_with_context(
+                    tables,
+                    &notebook,
+                    MapTrigger::BattleWin,
+                    &MapState::default(),
+                    &context,
+                );
+                assert_eq!(disk.grant_items.len(), 1);
+                assert!(disk.grant_items.iter().all(|id| pool.contains(id)));
+                let gifts = evaluate_map_with_context(
+                    tables,
+                    &rosetta,
+                    MapTrigger::Acquire(1),
+                    &MapState::default(),
+                    &context,
+                );
+                assert_eq!(gifts.grant_items.len(), 2);
+                assert!(gifts.grant_items.iter().all(|id| pool.contains(id)));
+                if is_unlocked {
+                    drawn_after_unlock.extend(disk.grant_items);
+                    saw_locked_extra_action_after_unlock |= gifts.grant_items.contains(&8320709);
+                } else {
+                    assert!(disk.grant_items.iter().all(|id| !gated_disks.contains(id)));
+                    assert!(!gifts.grant_items.contains(&8320709));
+                }
+            }
+        }
+        assert!(
+            gated_disks.is_subset(&drawn_after_unlock),
+            "all four gated Disks enter the actual reward pool after 401"
+        );
+        assert!(
+            saw_locked_extra_action_after_unlock,
+            "the gated Rosetta result enters the actual gift pool after 401"
+        );
+    }
+
+    #[test]
+    fn empty_random_pool_does_not_block_fixed_seven_day_winder_gift() {
+        let context = MapContext {
+            eligible_items: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        let layout = bag(vec![item(1, 8330817, -1, -1)]);
+        let gift = evaluate_map_with_context(
+            tables(),
+            &layout,
+            MapTrigger::Acquire(1),
+            &MapState::default(),
+            &context,
+        );
+        assert_eq!(gift.grant_items, vec![8130804]);
+        let notebook = bag(vec![item(2, 8330002, 0, 0)]);
+        assert!(
+            evaluate_map_with_context(
+                tables(),
+                &notebook,
+                MapTrigger::BattleWin,
+                &MapState::default(),
+                &context
             )
             .grant_items
             .is_empty()

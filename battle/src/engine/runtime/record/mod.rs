@@ -102,6 +102,11 @@ pub enum FrameTrigger {
 pub enum RoundCue {
     // A skill cast by another skill keeps its step even when it changes nothing.
     CastStep,
+    /// The physical actor remains the deployed hero; the client renders the
+    /// frozen support character for this incantation.
+    SupportHero {
+        hero_id: i32,
+    },
     EnterFightDeal,
     ClearUniversalCard,
     DealCard1,
@@ -212,6 +217,19 @@ pub(crate) fn push_child(
 
 pub(crate) fn push_frame_cue(frames: &mut [SemanticFrame], path: &[usize], cue: RoundCue) {
     frame_mut(frames, path).items.push(FrameItem::Cue(cue));
+}
+
+pub(crate) fn set_support_hero(frames: &mut [SemanticFrame], path: &[usize], hero_id: i32) {
+    let frame = frame_mut(frames, path);
+    if !frame
+        .items
+        .iter()
+        .any(|item| matches!(item, FrameItem::Cue(RoundCue::SupportHero { .. })))
+    {
+        frame
+            .items
+            .push(FrameItem::Cue(RoundCue::SupportHero { hero_id }));
+    }
 }
 
 pub(crate) fn push_frame_child(frames: &mut [SemanticFrame], path: &[usize], child: SemanticFrame) {
