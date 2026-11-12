@@ -62,6 +62,15 @@ pub struct CardManager {
     persisting_temporary: Vec<CardInstanceId>,
     hand_limit_bonus: i32,
     refill_floor: usize,
+    // Narrow server-only provenance for buff act 739. Keep ordinary battle
+    // managers small and never change the Skill3 wire/AP/moxie semantics.
+    hero_precast: Option<Box<HeroPrecastProvenance>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct HeroPrecastProvenance {
+    hand_ids: HashSet<CardInstanceId>,
+    played_indices: HashSet<i32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -123,6 +132,7 @@ impl CardManager {
             persisting_temporary: Vec::new(),
             hand_limit_bonus: 0,
             refill_floor: 0,
+            hero_precast: None,
         }
     }
 
@@ -145,6 +155,7 @@ impl CardManager {
             persisting_temporary: Vec::new(),
             hand_limit_bonus: 0,
             refill_floor: 0,
+            hero_precast: None,
         }
     }
 
@@ -332,6 +343,7 @@ impl CardManager {
         self.pending_temporary.clear();
         self.persisting_temporary.clear();
         self.refill_floor = 0;
+        self.hero_precast = None;
     }
 
     pub fn seed(&mut self, fight: &sonettobuf::Fight) {
@@ -342,6 +354,10 @@ impl CardManager {
 
     pub(super) fn begin_round(&mut self) {
         self.played.clear();
+        if let Some(state) = self.hero_precast.as_mut() {
+            state.played_indices.clear();
+            state.hand_ids.retain(|id| self.deck.contains_hand_id(*id));
+        }
         self.refilled.clear();
         self.queued_use_cards.clear();
         for card_id in std::mem::take(&mut self.pending_temporary) {
@@ -469,10 +485,33 @@ impl CardManager {
             .iter()
             .position(|played| played.card_index == card_index)?;
         let card = self.played.remove(index).card;
+        let hero_precast = self
+            .hero_precast
+            .as_mut()
+            .is_some_and(|state| state.played_indices.remove(&card_index));
         if restore {
+            let index = self.deck.hand().len();
             self.deck.add_to_hand(card.clone());
+            if hero_precast {
+                self.mark_hero_precast(index);
+            }
         }
         Some(card)
+    }
+
+    pub(crate) fn is_hero_precast_play(&self, card_index: i32) -> bool {
+        self.hero_precast
+            .as_ref()
+            .is_some_and(|state| state.played_indices.contains(&card_index))
+    }
+
+    fn mark_hero_precast(&mut self, hand_index: usize) {
+        if let Some(id) = self.deck.hand_id(hand_index) {
+            self.hero_precast
+                .get_or_insert_with(Default::default)
+                .hand_ids
+                .insert(id);
+        }
     }
 
     pub fn resolve_played_ranks(&mut self) -> Vec<CardRankChange> {
@@ -1135,6 +1174,17 @@ impl CardManager {
         choice: Option<CardPlayChoice>,
         recorded_skill: Option<crate::engine::skill::action::SkillRequest>,
     ) -> Option<PlayedCard> {
+        // Instance IDs follow moves and distinguish an identical generic
+        // Skill3 card. Capture live IDs before removal so stale expirations
+        // and replay choices cannot turn another card into a 739 precast.
+        let hero_precast_ids = self.hero_precast.as_ref().map(|state| {
+            state
+                .hand_ids
+                .iter()
+                .copied()
+                .filter(|id| self.deck.contains_hand_id(*id))
+                .collect::<Vec<_>>()
+        });
         let recorded_skill = recorded_skill.filter(|recorded| {
             self.deck.hand().iter().any(|card| {
                 card.uid == Some(recorded.source_uid) && card.skill_id == Some(recorded.skill_id)
@@ -1187,6 +1237,15 @@ impl CardManager {
             return None;
         }
         let action_index = self.played.len() as i32 + 1;
+        if let Some(state) = self.hero_precast.as_mut() {
+            if hero_precast_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| !self.deck.contains_hand_id(*id)))
+            {
+                state.played_indices.insert(action_index);
+            }
+            state.hand_ids.retain(|id| self.deck.contains_hand_id(*id));
+        }
 
         let played = PlayedCard {
             card: source,

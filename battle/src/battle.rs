@@ -46,6 +46,9 @@ impl Battle {
     pub fn rouge_counters(&self) -> crate::rouge::Counters {
         self.runtime.rouge_counters()
     }
+    pub fn rouge_summary(&self) -> Option<crate::rouge::BattleSummary> {
+        self.runtime.rouge_summary()
+    }
 
     pub fn current_round(&self) -> i32 {
         self.runtime.current_round()

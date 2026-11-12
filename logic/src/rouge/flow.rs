@@ -24,6 +24,7 @@ pub struct Details {
     pub repair_shop_num: i32,
     pub displace_num: i32,
     pub special_events: super::special_events::State,
+    pub achievements: super::badges::Progress,
     pub compositions: BTreeMap<i32, i32>,
     pub triggered_talents: Vec<usize>,
     pub effects: Vec<i32>,
@@ -318,6 +319,7 @@ pub async fn save_action<'e>(
     run: &mut RougeRun,
 ) -> Result<(), AppError> {
     super::artifact_lifecycle::prepare(expected, run)?;
+    super::badges::observe_roster(run)?;
     save(db, expected, run).await
 }
 
@@ -803,6 +805,11 @@ impl RougeManager {
         if !choice.version.is_empty() || !choice_is_unlocked(&run, choice) {
             return Err(AppError::InvalidRequest);
         }
+        if super::special_events::fountain_choice_ids(event).is_some() {
+            return self
+                .resolve_fountain_choice(db, expected, event, choice_id)
+                .await;
+        }
         let mut chosen: HashMap<String, i32> = serde_json::from_str(&run.choices)?;
         if chosen.insert(node.to_string(), choice_id).is_some() {
             return Err(AppError::InvalidRequest);
@@ -870,6 +877,91 @@ impl RougeManager {
         save_action(db, &expected, &mut run).await?;
         Ok(map_info(&run))
     }
+    async fn resolve_fountain_choice(
+        self,
+        db: &SqlitePool,
+        expected: RougeRun,
+        event: i32,
+        choice: i32,
+    ) -> Result<RougeMapInfo, AppError> {
+        use super::special_events::{self, FountainResolution, FountainSource};
+        let mut run = expected.clone();
+        let mut detail = details(&run);
+        let outcome = match special_events::resolve_fountain(
+            &mut detail.special_events,
+            FountainSource {
+                run_seed: run.seed as u64,
+                layer_id: run.layer_id,
+                node_id: run.node_id,
+            },
+            event,
+            choice,
+            run.coin,
+        )
+        .map_err(|_| AppError::InvalidRequest)?
+        {
+            FountainResolution::Replayed(_) => return Ok(map_info(&run)),
+            FountainResolution::Apply(outcome) => outcome,
+        };
+        // Only the explicit net outcome is charged; the displayed eligibility
+        // threshold is not an additional stake. Positive grants follow the
+        // same outside-growth scaling as other event coin grants.
+        if outcome.coin_delta < 0 {
+            let cost = outcome.coin_delta.saturating_neg();
+            if run.coin < cost {
+                return Err(AppError::InvalidRequest);
+            }
+            run.coin -= cost;
+            run.spent_coin = run.spent_coin.saturating_add(cost);
+        } else {
+            run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
+                outcome.coin_delta,
+                bonuses(&run).coin_percent,
+            ));
+        }
+        if let Some(id) = outcome.badge_choice.filter(|_| run.coin > expected.coin) {
+            super::badges::record_fountain_gain(&mut detail.achievements, outcome.source, id);
+        }
+        run.details = serde_json::to_string(&detail)?;
+        let mut graph: map::LayerMap = serde_json::from_str(&run.graph)?;
+        let transition = special_events::fountain_transition_current(
+            config::configs::get(),
+            &mut graph,
+            &outcome,
+        )
+        .map_err(|_| AppError::InvalidRequest)?;
+        let mut choices: HashMap<String, i32> = serde_json::from_str(&run.choices)?;
+        let mut finished: Vec<i32> = json_ids(&run.finished);
+        if transition.is_some() {
+            choices.remove(&run.node_id.to_string());
+            finished.retain(|id| *id != run.node_id);
+        } else if choices.insert(run.node_id.to_string(), choice).is_some() {
+            return Err(AppError::InvalidRequest);
+        }
+        run.choices = serde_json::to_string(&choices)?;
+        run.finished = serde_json::to_string(&finished)?;
+        run.graph = serde_json::to_string(&graph)?;
+        run.battle_interactive.clear();
+        run.interactive_index = -1;
+        run.interactive_refresh = 0;
+        run.retry_num = 0;
+        run.middle_state = updated_entrust(
+            &expected,
+            EntrustChange {
+                gained_coin: (run.coin - expected.coin).max(0),
+                spent_coin: (expected.coin - run.coin).max(0),
+                finished_event: transition.is_none().then_some(event),
+                ..Default::default()
+            },
+        )?;
+        super::artifact_lifecycle::prepare(&expected, &mut run)?;
+        if transition.is_none() {
+            finish_node(&mut run)?;
+        }
+        save_action(db, &expected, &mut run).await?;
+        Ok(map_info(&run))
+    }
+
     pub async fn compose(
         self,
         db: &SqlitePool,

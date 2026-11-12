@@ -509,6 +509,10 @@ impl BattleRuntime {
                 absorb_hurt_map_layout,
             )?);
         }
+        // Round bonuses protect allies through the defender's actions, then
+        // expire before wave entry and the following round's effects. Growth
+        // and the battle summary survive this reset.
+        crate::rouge::end_incantation_round(&mut self.managers);
         let mut wave_entering_uids = Vec::new();
         if let Some(transition) = advance_wave_transition(
             &mut self.fight,

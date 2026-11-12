@@ -360,3 +360,78 @@ fn stacked_random_anticipation_generates_one_real_precast_per_stack() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn own_739_precasts_count_for_syntony_keep_free_wire_semantics_and_replay() {
+    let mut initial = fight(None);
+    // Three distinct owners keep this test about precast provenance rather
+    // than the separate rules for composing identical temporary cards.
+    let lilya = &mut initial.attacker.as_mut().unwrap().entitys[1];
+    let (first, second, ultimate) =
+        crate::hero::active_skills(crate::test_support::game_data(), 3004, 3, 1);
+    lilya.model_id = Some(3004);
+    lilya.skill_group1 = first;
+    lilya.skill_group2 = second;
+    lilya.ex_skill = Some(ultimate);
+    let mut frozen = context(&[], false);
+    frozen.incantation_rules = Some(IncantationRules::default());
+    let (plain, _) = start(initial.clone(), Some(frozen.clone()), 42);
+    let boundary_uid = plain.card_hand().last().unwrap().uid.unwrap();
+    for entity in &mut initial.attacker.as_mut().unwrap().entitys {
+        if entity.uid != Some(boundary_uid) {
+            entity.buffs = vec![BuffInfo {
+                uid: Some(900 + entity.uid.unwrap()),
+                buff_id: Some(90082),
+                from_uid: entity.uid,
+                layer: Some(1),
+                duration: Some(1),
+                ..Default::default()
+            }];
+        }
+    }
+    let (mut runtime, opening) = start(initial.clone(), Some(frozen.clone()), 42);
+    let hand = runtime.card_hand().to_vec();
+    let first = hand
+        .iter()
+        .position(|card| card.temp_card == Some(true))
+        .unwrap();
+    assert_eq!(hand.len() - first, 3);
+    assert!(
+        hand[first..]
+            .iter()
+            .all(|card| card.card_type == Some(6) && card.temp_card == Some(true))
+    );
+    let opers = vec![
+        BeginRoundOper {
+            oper_type: Some(2),
+            param1: Some(first as i32 + 1),
+            to_id: Some(-1),
+            ..Default::default()
+        };
+        3
+    ];
+    let planned = runtime.plan_auto_round(&sonettobuf::AutoRoundRequest {
+        opers: opers.clone(),
+        to_id: Some(-1),
+    });
+    assert_eq!(
+        planned.opers.len(),
+        4,
+        "three precasts must leave the four ordinary action points available"
+    );
+    let request = BeginRoundRequest {
+        opers,
+        ..Default::default()
+    };
+    let round = runtime.advance_round(request.clone()).unwrap();
+    for uid in 10..=13 {
+        assert_eq!(runtime.entity_info(uid).unwrap().ex_point, Some(0));
+    }
+    assert_eq!(runtime.rouge_summary().unwrap().syntony_max_level, 1);
+    assert_eq!(runtime.rouge_summary().unwrap().casts, 3);
+    let restored = serde_json::from_str(&serde_json::to_string(&frozen).unwrap()).unwrap();
+    let (mut replay, replay_opening) = start(initial, Some(restored), 42);
+    assert_eq!(opening, replay_opening);
+    assert_eq!(round, replay.advance_round(request).unwrap());
+    assert_eq!(runtime.rouge_summary(), replay.rouge_summary());
+}

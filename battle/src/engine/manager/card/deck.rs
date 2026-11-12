@@ -95,6 +95,10 @@ impl CardDeck {
         self.hand_ids.get(index).copied()
     }
 
+    pub(super) fn contains_hand_id(&self, id: CardInstanceId) -> bool {
+        self.hand_ids.contains(&id)
+    }
+
     pub fn into_hand(self) -> Vec<CardInfo> {
         self.hand
     }

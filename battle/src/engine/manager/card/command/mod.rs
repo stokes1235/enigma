@@ -772,6 +772,7 @@ pub(super) fn execute(
             {
                 return Err(CardCommandError::InvalidCommand);
             }
+            let hand_index = manager.hand().len();
             let card = match add.kind {
                 TemporaryCardKind::GenericSkill => manager.add_temp_card(add.skill_id),
                 TemporaryCardKind::SupportSkill => {
@@ -787,6 +788,9 @@ pub(super) fn execute(
                     add.team_type,
                 ),
             };
+            if add.kind == TemporaryCardKind::HeroSkill && add.origin.key.opcode == 739 {
+                manager.mark_hero_precast(hand_index);
+            }
             operation = Some(CardChange::SpCardAdd {
                 target_uid: add.target_uid,
                 skill_id: add.skill_id,

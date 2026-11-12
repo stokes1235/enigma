@@ -80,6 +80,9 @@ pub struct MapState {
     /// Per-instance permanent stat rates, applied only while that item is active.
     /// A combat adapter may persist verified growth here after battle settlement.
     pub permanent_rates: BTreeMap<i64, BTreeMap<i32, i32>>,
+    /// Per-fight cumulative NEW growth already merged, in percentage points.
+    /// Fight identity and item UID prevent replay/reconnect double credit.
+    pub battle_growth: BTreeMap<i64, BTreeMap<i64, i32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,7 +415,7 @@ pub fn evaluate_battle_with_state(
                 add_rate(&mut result, 205, 200 + count2 * 10);
                 result.unsupported.push(unsupported(
                     item,
-                    "permanent Syntony growth needs per-run combat counters",
+                    "Syntony growth persists; catalyst-specific triggering and level rewrites remain incomplete",
                 ));
             }
             8310609 => {
@@ -436,10 +439,9 @@ pub fn evaluate_battle_with_state(
             8320618 => result.coin_drop_bonus_per_mille += 200,
             8320310 => {
                 add_rate(&mut result, 214, count2 * 10);
-                result.unsupported.push(unsupported(
-                    item,
-                    "per-hero rank-2/3 permanent growth needs combat settlement",
-                ));
+                // The battle hook applies shared permanent growth, with
+                // independent once-per-actor rank-2/rank-3 limits. Saved rates
+                // are applied above; count2 here is static inlay data only.
             }
             8330001 => result.shop_price_reduction_per_mille += 100,
             8330002 => {
@@ -483,7 +485,7 @@ pub fn evaluate_battle_with_state(
                 add_rate(&mut result, 206, 200 + count2 * 10);
                 result.unsupported.push(unsupported(
                     item,
-                    "permanent Syntony growth needs per-run combat counters",
+                    "Syntony growth persists; catalyst-specific triggering and level rewrites remain incomplete",
                 ));
             }
             8330607 => {
@@ -497,7 +499,7 @@ pub fn evaluate_battle_with_state(
             | 8330817 => {}
             8320506 => result.unsupported.push(unsupported(
                 item,
-                "battle-entry power supported; Syntony buffs need combat support",
+                "battle-entry power supported; Resonance buffs need combat support",
             )),
             8310309 => result.unsupported.push(unsupported(
                 item,

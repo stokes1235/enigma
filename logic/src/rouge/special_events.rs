@@ -11,7 +11,7 @@
 //! run or apply resource/inventory mutations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::map::{LayerMap, MapNode};
 
@@ -21,6 +21,7 @@ pub const CHALICE_BATTLE: i32 = 110_109;
 pub const ANCIENT_CHALICE: i32 = 8_320_025;
 pub const AACHEN_ROSE: i32 = 8_320_907;
 pub const LITTLE_CONCH: i32 = 8_180_501;
+pub const FOUNTAIN_EVENTS: [i32; 3] = [106113, 1061131, 1061132];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EffectSource {
@@ -61,6 +62,206 @@ pub struct State {
     pub seen_effects: BTreeSet<(EffectSource, i32)>,
     pub placements: Vec<Placement>,
     pub rewarded_battles: BTreeSet<BattleSource>,
+    /// Keys are run-seed/layer/node strings so JSON map serialization is stable.
+    /// Receipts prevent reconnects from rerolling or applying the same reward.
+    pub fountains: BTreeMap<String, FountainProgress>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FountainSource {
+    pub run_seed: u64,
+    pub layer_id: i32,
+    pub node_id: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FountainOutcome {
+    pub source: FountainSource,
+    pub event_id: i32,
+    pub choice_id: i32,
+    /// Net change from the displayed outcome, with no hidden upfront stake.
+    pub coin_delta: i32,
+    /// None means the player selected Leave and no random roll occurred.
+    pub won: Option<bool>,
+    pub next_event_id: Option<i32>,
+    /// Candidate only: caller also checks the actual applied balance increased.
+    /// Observation choices are absent from badge 19's configured three IDs.
+    pub badge_choice: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FountainProgress {
+    /// None means the event has ended.
+    pub current_event: Option<i32>,
+    pub outcomes: BTreeMap<i32, FountainOutcome>,
+}
+
+impl Default for FountainProgress {
+    fn default() -> Self {
+        Self {
+            current_event: Some(FOUNTAIN_EVENTS[0]),
+            outcomes: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FountainResolution {
+    Apply(FountainOutcome),
+    /// Return current map info without applying this old currency delta again.
+    Replayed(FountainOutcome),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FountainError {
+    #[error("invalid Fountain source")]
+    InvalidSource,
+    #[error("unknown Fountain phase")]
+    InvalidPhase,
+    #[error("choice does not belong to this Fountain phase")]
+    InvalidChoice,
+    #[error("Fountain phase was skipped or has already ended")]
+    PhaseMismatch,
+    #[error("insufficient coins for the displayed Fountain threshold")]
+    InsufficientCoin,
+}
+
+pub fn fountain_choice_ids(event: i32) -> Option<&'static [i32]> {
+    match event {
+        106113 => Some(&[10611301, 10611302, 10611303]),
+        1061131 => Some(&[10611311, 10611312, 10611313]),
+        1061132 => Some(&[10611321, 10611322, 10611323]),
+        _ => None,
+    }
+}
+
+fn fountain_won(source: FountainSource, choice: i32) -> bool {
+    // The 50/50 chance is explicit in both Throw and Observe descriptions.
+    // Only the deterministic sampler/seed derivation is a local convention.
+    let mut value = source.run_seed
+        ^ (source.layer_id as u64).rotate_left(13)
+        ^ (source.node_id as u64).rotate_left(29)
+        ^ (choice as u64).rotate_left(43);
+    value = value.wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    (value ^ (value >> 31)) & 1 == 0
+}
+
+/// Resolve only this three-stage chain. All currency changes and the receipt
+/// must be committed with the owning action. The data has no next-stage field:
+/// advancing after each Throw/Observe, on either win or loss, is an explicit
+/// local convention; it is not claimed as a captured official transition.
+///
+/// Stage two uses the displayed +60, not the conflicting rouge_drop +80.
+/// Thresholds 30/80/120 are eligibility gates, never additional charges.
+pub fn resolve_fountain(
+    state: &mut State,
+    source: FountainSource,
+    event: i32,
+    choice: i32,
+    coin: i32,
+) -> Result<FountainResolution, FountainError> {
+    if source.layer_id <= 0 || source.node_id < 0 {
+        return Err(FountainError::InvalidSource);
+    }
+    let phase = FOUNTAIN_EVENTS
+        .iter()
+        .position(|id| *id == event)
+        .ok_or(FountainError::InvalidPhase)?;
+    let menu = fountain_choice_ids(event).ok_or(FountainError::InvalidPhase)?;
+    let selected = menu
+        .iter()
+        .position(|id| *id == choice)
+        .ok_or(FountainError::InvalidChoice)?;
+    let key = format!("{}:{}:{}", source.run_seed, source.layer_id, source.node_id);
+    if let Some(previous) = state.fountains.get(&key) {
+        if let Some(outcome) = previous
+            .outcomes
+            .get(&choice)
+            .filter(|outcome| outcome.event_id == event)
+        {
+            return Ok(FountainResolution::Replayed(*outcome));
+        }
+        if previous.current_event != Some(event) {
+            return Err(FountainError::PhaseMismatch);
+        }
+    } else if phase != 0 {
+        return Err(FountainError::PhaseMismatch);
+    }
+    let leave = selected == 2;
+    if !leave && coin < [30, 80, 120][phase] {
+        return Err(FountainError::InsufficientCoin);
+    }
+    let won = (!leave).then(|| fountain_won(source, choice));
+    let delta = match won {
+        Some(true) => [30, 60, 120][phase],
+        Some(false) => -[20, 40, 100][phase],
+        None => 0,
+    };
+    let next = if leave {
+        None
+    } else {
+        FOUNTAIN_EVENTS.get(phase + 1).copied()
+    };
+    let outcome = FountainOutcome {
+        source,
+        event_id: event,
+        choice_id: choice,
+        coin_delta: delta,
+        won,
+        next_event_id: next,
+        badge_choice: (selected == 0 && won == Some(true) && delta > 0).then_some(choice),
+    };
+    let progress = state.fountains.entry(key).or_default();
+    progress.current_event = next;
+    progress.outcomes.insert(choice, outcome);
+    Ok(FountainResolution::Apply(outcome))
+}
+
+/// Preserve the current node's path/position while changing its Fountain
+/// phase. Caller clears the old choices/finished entry and interaction cursor.
+/// A terminal result returns None; caller finishes the existing node normally.
+pub fn fountain_transition_current(
+    tables: &config::GameDB,
+    graph: &mut LayerMap,
+    outcome: &FountainOutcome,
+) -> Result<Option<Transition>, RuleError> {
+    let source = outcome.source;
+    if graph.layer_id != source.layer_id {
+        return Err(RuleError::InvalidNode(source.node_id));
+    }
+    let node = graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_id == source.node_id)
+        .ok_or(RuleError::InvalidNode(source.node_id))?;
+    if node.event_id != outcome.event_id
+        || fountain_choice_ids(outcome.event_id).is_none_or(|ids| !ids.contains(&outcome.choice_id))
+    {
+        return Err(RuleError::InvalidEvent(outcome.event_id));
+    }
+    let Some(next) = outcome.next_event_id else {
+        return Ok(None);
+    };
+    let expected = FOUNTAIN_EVENTS
+        .iter()
+        .position(|id| *id == outcome.event_id)
+        .and_then(|index| FOUNTAIN_EVENTS.get(index + 1))
+        .copied();
+    if expected != Some(next) {
+        return Err(RuleError::InvalidEvent(next));
+    }
+    let kind = event_type(tables, next)?;
+    node.event_id = next;
+    node.node_type = kind;
+    Ok(Some(Transition {
+        node_id: source.node_id,
+        previous_event: outcome.event_id,
+        event_id: next,
+        effect_id: None,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +427,9 @@ pub fn cancel_entrust(state: &mut State, entrust_id: i32) {
 /// exposes the second-stage rewards in the first stage, and gives stage two no
 /// choices at all (`1061511 -> 10615111/12`, likewise for `1061521`).
 pub fn choice_ids(event: i32) -> Option<&'static [i32]> {
+    if let Some(ids) = fountain_choice_ids(event) {
+        return Some(ids);
+    }
     Some(match event {
         CHALICE_DISCOVERY => &[10_614_101, 10_614_102],
         106_151 => &[10_615_101, 10_615_102],
@@ -264,6 +468,11 @@ pub enum ChoiceAction {
 /// Fixed outcomes from the displayed choice data. Returning None means this
 /// module owns neither that event nor that choice/phase combination.
 pub fn choice_action(event: i32, choice: i32) -> Option<ChoiceAction> {
+    // Fountain requires its persisted random resolver, not the generic fixed
+    // drop path. In particular the exported +80 stage-two row is not applied.
+    if fountain_choice_ids(event).is_some() {
+        return None;
+    }
     if !choice_ids(event)?.contains(&choice) {
         return None;
     }
@@ -395,7 +604,7 @@ pub fn can_spawn_randomly(
     if event_type(tables, event).is_err() {
         return false;
     }
-    if matches!(event, 1_061_511 | 1_061_521)
+    if matches!(event, 1_061_511 | 1_061_521 | 1_061_131 | 1_061_132)
         || tables.rouge_effect.iter().any(|effect| {
             effect.r#type == 30 && effect.type_param.trim().parse::<i32>().ok() == Some(event)
         })
@@ -408,6 +617,10 @@ pub fn can_spawn_randomly(
         _ => true,
     }
 }
+
+#[cfg(test)]
+#[path = "fountain_tests.rs"]
+mod fountain_tests;
 
 #[cfg(test)]
 mod tests {

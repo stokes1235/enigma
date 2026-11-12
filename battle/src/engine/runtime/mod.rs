@@ -87,6 +87,9 @@ impl BattleRuntime {
     pub fn rouge_counters(&self) -> crate::rouge::Counters {
         self.managers.rouge.counters()
     }
+    pub fn rouge_summary(&self) -> Option<crate::rouge::BattleSummary> {
+        self.managers.rouge.summary()
+    }
     /// Plans client auto-battle operations without mutating authoritative state.
     pub fn plan_auto_round(
         &self,

@@ -527,6 +527,15 @@ pub async fn settle_run(
     }
     sqlx::query("INSERT INTO user_rouge_settlement (user_id, season, rouge_info, result_info) VALUES (?, ?, ?, ?) ON CONFLICT (user_id, season) DO UPDATE SET rouge_info = excluded.rouge_info, result_info = excluded.result_info")
         .bind(user_id).bind(season).bind(rouge_info).bind(result_info).execute(&mut *tx).await?;
+    super::rouge_reviews::record_review_in_transaction(
+        &mut tx,
+        user_id,
+        season,
+        expected_run_seed,
+        result_info,
+        now,
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }

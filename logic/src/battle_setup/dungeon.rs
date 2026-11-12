@@ -71,6 +71,55 @@ pub async fn build_fight(
         );
         let mut context = battle::rouge::RougeContext::default();
         if let Some(attacker) = &built.fight.attacker {
+            let actors: Vec<i64> = attacker
+                .entitys
+                .iter()
+                .chain(&attacker.sub_entitys)
+                .filter_map(|entity| entity.uid)
+                .filter(|uid| *uid > 0)
+                .collect();
+            context.permanent_growth = crate::rouge::artifact_growth::initial_growth(
+                &bag,
+                &crate::rouge::flow::details(&run).artifact_state,
+            );
+            context.growth_sources = crate::rouge::artifact_growth::frozen_sources(&bag, &actors)
+                .into_iter()
+                .map(|source| battle::rouge::GrowthSource {
+                    uid: source.uid,
+                    item_id: source.item_id,
+                    syntony_artefact_count: source.syntony_artefact_count,
+                    rare_artefact_count: source.rare_artefact_count,
+                    actor_uids: source.actor_uids,
+                })
+                .collect();
+            let mut party = std::collections::BTreeSet::new();
+            for slot in &team.battle_hero_list {
+                if attacker
+                    .entitys
+                    .iter()
+                    .chain(&attacker.sub_entitys)
+                    .any(|entity| entity.model_id == slot.hero_id)
+                {
+                    if let Some(id) = slot.hero_id.filter(|id| *id > 0) {
+                        party.insert(id);
+                    }
+                    if let Some(id) = slot.support_hero_id.filter(|id| *id > 0) {
+                        party.insert(id);
+                    }
+                }
+            }
+            context.party_hero_ids = party.into_iter().collect();
+        }
+        let growth = crate::rouge::flow::details(&run)
+            .outside_genius
+            .unwrap_or_default();
+        if growth.contains(&401) {
+            context.incantation_rules = Some(battle::rouge::IncantationRules {
+                syntony_level_limit: 5 + i32::from(growth.contains(&411)),
+                resonance_level_limit: 5 + i32::from(growth.contains(&416)),
+            });
+        }
+        if let Some(attacker) = &built.fight.attacker {
             for entity in attacker.entitys.iter().chain(&attacker.sub_entitys) {
                 if let Some(uid) = entity.uid {
                     let slot = team

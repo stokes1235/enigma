@@ -27,6 +27,60 @@ pub struct RougeFightSettlement {
     pub map: RougeMapInfo,
 }
 
+fn record_combat_progress(
+    run: &mut database::models::game::rouge::RougeRun,
+    active: &ActiveBattle,
+    event_id: Option<i32>,
+    ending: bool,
+    won: bool,
+) -> Result<(), AppError> {
+    let Some(fight_id) = active.fight_id.filter(|id| *id > 0) else {
+        return Ok(());
+    };
+    let context = active.runtime.rouge_context();
+    let summary = active.runtime.rouge_summary();
+    crate::logic::rouge::badges::record_battle(
+        run,
+        fight_id,
+        event_id,
+        won,
+        ending,
+        context
+            .map(|ctx| ctx.party_hero_ids.as_slice())
+            .unwrap_or_default(),
+        summary.as_ref(),
+    )?;
+    // Retry returns to pre-fight life/resources; permanent growth follows the
+    // same local policy and is committed only on a successful fight.
+    if won && let Some(context) = context {
+        let sources: Vec<_> = context
+            .growth_sources
+            .iter()
+            .map(
+                |source| crate::logic::rouge::artifact_growth::GrowthSource {
+                    uid: source.uid,
+                    item_id: source.item_id,
+                    syntony_artefact_count: source.syntony_artefact_count,
+                    rare_artefact_count: source.rare_artefact_count,
+                    actor_uids: source.actor_uids.clone(),
+                },
+            )
+            .collect();
+        let mut detail = crate::logic::rouge::flow::details(run);
+        let result = crate::logic::rouge::artifact_growth::merge_battle_growth(
+            &mut detail.artifact_state,
+            fight_id,
+            &sources,
+            &active.runtime.rouge_counters(),
+        );
+        if !result.rejected.is_empty() {
+            tracing::debug!(?result.rejected,"rejected invalid Rouge growth report");
+        }
+        run.details = serde_json::to_string(&detail)?;
+    }
+    Ok(())
+}
+
 /// Whether an active battle belongs to a rouge run.
 pub fn matches_battle(active: &ActiveBattle) -> bool {
     active.chapter_id == ROUGE_CHAPTER_ID
@@ -205,6 +259,7 @@ pub async fn settle_in_transaction(
             return Err(AppError::InvalidRequest);
         }
         let won = active.runtime.outcome() == battle::BattleOutcome::Victory;
+        record_combat_progress(&mut run, active, None, true, won)?;
         let fight_team = team_info(active);
         let mut team: RougeTeamInfo = serde_json::from_str(&run.team)?;
         for life in fight_team.hero_life_list {
@@ -262,6 +317,12 @@ pub async fn settle_in_transaction(
     let node_id = Some(node.node_id);
     let final_node = node.next.is_empty();
     let won = active.runtime.outcome() == battle::BattleOutcome::Victory;
+    record_combat_progress(&mut run, active, Some(node.event_id), false, won)?;
+    sqlx::query("UPDATE user_rouge_run SET details = ? WHERE user_id = ? AND season = 1")
+        .bind(&run.details)
+        .bind(player_id)
+        .execute(&mut **tx)
+        .await?;
     let retry_num = if won {
         0
     } else {
@@ -413,6 +474,8 @@ pub async fn settle_in_transaction(
     }))
 }
 
+#[cfg(test)]
+mod growth_tests;
 #[cfg(test)]
 mod story_tests;
 #[cfg(test)]

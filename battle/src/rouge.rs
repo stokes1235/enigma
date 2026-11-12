@@ -2,7 +2,7 @@
 //!
 //! The server persists the initial context with the battle seed and replays
 //! committed operations on reconnect. Never rebuild it from a changed bag.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,11 @@ use crate::engine::{
     },
 };
 
+mod growth;
+mod statistics;
+pub(crate) use growth::end_round as end_incantation_round;
+pub(crate) use statistics::record_hp;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RougeContext {
@@ -35,6 +40,66 @@ pub struct RougeContext {
     pub first_slot_uid: Option<i64>,
     pub conditional_modifiers: Vec<ConditionalModifier>,
     pub support_skills: Vec<SupportSkill>,
+    /// Actual deployed mains and selected supports, frozen for ending badges.
+    pub party_hero_ids: Vec<i32>,
+    /// Previously earned growth. The frozen Fight already includes these
+    /// attributes; this is a baseline for persistence, never applied twice.
+    pub permanent_growth: Counters,
+    pub growth_sources: Vec<GrowthSource>,
+    /// None preserves old contexts and ordinary battles without this unlock.
+    pub incantation_rules: Option<IncantationRules>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GrowthSource {
+    pub uid: i64,
+    pub item_id: i32,
+    pub syntony_artefact_count: i32,
+    pub rare_artefact_count: i32,
+    /// Deployed actor UIDs; support incantations retain their main's UID.
+    pub actor_uids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IncantationRules {
+    pub syntony_level_limit: i32,
+    pub resonance_level_limit: i32,
+}
+
+impl Default for IncantationRules {
+    fn default() -> Self {
+        Self {
+            syntony_level_limit: 5,
+            resonance_level_limit: 5,
+        }
+    }
+}
+
+/// Committed events only. Damage includes absorbed shields and clipped HP
+/// loss, never overkill. An action maximum is the completed action's damage;
+/// it is separate from the maximum single-target HP command.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BattleSummary {
+    pub damage_dealt: i64,
+    pub damage_taken: i64,
+    pub healing_done: i64,
+    pub max_single_damage: i64,
+    pub max_action_damage: i64,
+    pub enemy_kills: i32,
+    pub ally_deaths: i32,
+    pub ally_revives: i32,
+    pub casts: i32,
+    pub rank1_casts: i32,
+    pub rank2_casts: i32,
+    pub rank3_casts: i32,
+    pub ultimate_casts: i32,
+    pub support_casts: i32,
+    pub extra_action_casts: i32,
+    pub syntony_max_level: i32,
+    pub resonance_max_level: i32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,8 +241,7 @@ pub struct Artefact {
 }
 
 /// Per-item growth earned during this battle, relative to the initial context.
-/// The first supported triggers do not create permanent growth, so this is
-/// empty until a corresponding verified growth route is implemented.
+/// `growth_pct` is percentage points, separate from inserted-Disk count2.
 pub type Counters = BTreeMap<i64, BTreeMap<String, i32>>;
 
 #[derive(Debug, Clone, Default)]
@@ -194,6 +258,18 @@ struct ActiveRouge {
     aid_since_settlement: bool,
     shield_round: Option<i32>,
     counters: Counters,
+    growth_triggers: BTreeSet<(i64, i64, i32)>,
+    summary: BattleSummary,
+    incantation: IncantationState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IncantationState {
+    casts_by_type: BTreeMap<i32, i32>,
+    levels: BTreeMap<i32, i32>,
+    resonance_level: i32,
+    /// Exact deltas owned by this round, so permanent growth is not removed.
+    attributes: BTreeMap<(i64, i32), i32>,
 }
 
 impl RougeRuntime {
@@ -205,6 +281,9 @@ impl RougeRuntime {
             .as_ref()
             .map(|active| active.counters.clone())
             .unwrap_or_default()
+    }
+    pub(crate) fn summary(&self) -> Option<BattleSummary> {
+        self.active.as_ref().map(|active| active.summary.clone())
     }
 }
 
@@ -310,6 +389,8 @@ pub(crate) fn observe_events(
                 if aid {
                     managers.rouge.active.as_mut().unwrap().aid_since_settlement = true;
                 }
+                statistics::record_action(managers, action, aid);
+                result.extend(growth::completed_action(managers, pool, action));
                 if bottle
                     && matches!(action.rank, 2 | 3)
                     && !managers.catalog().skill_is_big(action.skill_id)
@@ -318,18 +399,25 @@ pub(crate) fn observe_events(
                     result.push(grant(uid, uid, 5041));
                 }
             }
-            BattleEvent::EntityDied(death)
-                if serums > 0
+            BattleEvent::EntityDied(death) => {
+                let summary = &mut managers.rouge.active.as_mut().unwrap().summary;
+                if pool.team_type(death.target_uid) == Some(1) {
+                    summary.ally_deaths = summary.ally_deaths.saturating_add(1);
+                } else if pool.team_type(death.target_uid) == Some(2)
                     && pool.source_is_attacker(death.source_uid)
+                {
+                    summary.enemy_kills = summary.enemy_kills.saturating_add(1);
+                }
+                if pool.source_is_attacker(death.source_uid)
                     && pool.team_type(death.target_uid) == Some(2)
-                    && managers.hp.current(death.source_uid) > 0 =>
-            {
-                // Exact client states: Support I and random own Precast I.
-                // Credited killer as recipient remains a documented local
-                // interpretation until an official multi-ally sample exists.
-                for _ in 0..serums {
-                    result.push(grant(death.source_uid, death.source_uid, 90331));
-                    result.push(grant(death.source_uid, death.source_uid, 90082));
+                    && managers.hp.current(death.source_uid) > 0
+                {
+                    // Exact client states: Support I and random own Precast I.
+                    // Credited killer remains an explicit local interpretation.
+                    for _ in 0..serums {
+                        result.push(grant(death.source_uid, death.source_uid, 90331));
+                        result.push(grant(death.source_uid, death.source_uid, 90082));
+                    }
                 }
             }
             _ => {}
@@ -404,3 +492,6 @@ mod tests;
 
 #[cfg(test)]
 mod support_tests;
+
+#[cfg(test)]
+mod growth_tests;

@@ -52,6 +52,7 @@ pub mod rouge;
 pub mod rouge_extra;
 pub mod rouge_favorites;
 pub mod rouge_history;
+pub mod rouge_reviews;
 pub mod settings;
 pub mod sign_in;
 pub mod simple_property;

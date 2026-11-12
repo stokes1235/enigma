@@ -5,10 +5,10 @@
 //! stored items. SlotMO also replaces item.attr with layout.attr on creation,
 //! so both fields must carry the same placed-item values.
 //!
-//! Only static Disk enhancements, the implemented pouch counter, and formulas
-//! whose expression variables are explicit in rouge_desc are supplied here.
-//! Battle-triggered/permanent growth and unimplemented consumption counters
-//! remain absent; an unrelated map counter must never become count2.
+//! Only static Disk enhancements, implemented persistent counters/growth, and
+//! formulas whose variables are explicit in rouge_desc are supplied here.
+//! An unrelated map counter must never become count2; permanent battle growth
+//! comes from its separately typed per-instance attribute rate.
 
 use super::bag::{BagItem, RunBag};
 use database::models::game::rouge::RougeRun;
@@ -101,6 +101,15 @@ fn values(run: &RougeRun, bag: Option<&RunBag>, item: &BagItem) -> BTreeMap<i32,
             .unwrap_or_default()
             .max(0);
         *result.entry(1002).or_default() += i64::from(eaten).saturating_mul(3);
+    }
+    if matches!(item.item_id, 8310405 | 8330418 | 8320310) {
+        let permanent = super::artifact_growth::permanent_count2(
+            item,
+            &super::flow::details(run).artifact_state,
+        );
+        if permanent > 0 {
+            *result.entry(1002).or_default() += i64::from(permanent);
+        }
     }
     if !active(item) {
         return result;
@@ -279,6 +288,62 @@ mod tests {
         assert_eq!(
             attrs(&item_payload(&run, &bag.items[0])).get(&1002),
             Some(&6)
+        );
+    }
+
+    #[test]
+    fn battle_growth_count2_adds_to_inlays_once_and_survives_warehouse_display() {
+        let mut horn = item(1, 8310405);
+        horn.holes = vec![8240402];
+        horn.hole_ids = vec![21];
+        let (mut run, mut bag) = fixture(vec![horn, item(2, 8320310), item(3, 8330418)]);
+        let mut detail = super::super::flow::details(&run);
+        detail
+            .artifact_state
+            .permanent_rates
+            .insert(1, BTreeMap::from([(205, 120)]));
+        detail
+            .artifact_state
+            .permanent_rates
+            .insert(2, BTreeMap::from([(214, 60)]));
+        detail
+            .artifact_state
+            .permanent_rates
+            .insert(3, BTreeMap::from([(206, 40)]));
+        run.details = serde_json::to_string(&detail).unwrap();
+        let payload = bag_payload(&run, &bag);
+        assert_eq!(
+            attrs(payload.layouts[0].item.as_ref().unwrap()).get(&1002),
+            Some(&22)
+        );
+        assert_eq!(
+            payload.layouts[0].attr,
+            payload.layouts[0].item.as_ref().unwrap().attr
+        );
+        assert_eq!(
+            attrs(&item_payload(&run, &bag.items[1])).get(&1002),
+            Some(&6)
+        );
+        assert_eq!(
+            attrs(&item_payload(&run, &bag.items[2])).get(&1002),
+            Some(&4)
+        );
+        let effects = super::super::artifact_rules::evaluate_battle_with_state(
+            config::configs::get(),
+            &bag,
+            0,
+            &detail.artifact_state,
+        );
+        assert_eq!(effects.attribute_rates.get(&205), Some(&420));
+        assert_eq!(effects.attribute_rates.get(&214), Some(&60));
+        assert_eq!(effects.attribute_rates.get(&206), Some(&240));
+        bag.items[0].row = -1;
+        bag.items[0].col = -1;
+        run.bag = serde_json::to_string(&bag).unwrap();
+        assert_eq!(
+            attrs(&item_payload(&run, &bag.items[0])).get(&1002),
+            Some(&12),
+            "stored client adds the static Disk enhancement itself"
         );
     }
 

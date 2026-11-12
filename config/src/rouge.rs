@@ -120,6 +120,9 @@ impl GameDB {
         // Nested story phases use explicit menu IDs: the second phase has an
         // extra digit, and cannot be grouped by choice.id / 100.
         let phase: Option<&[i32]> = match event_id {
+            106113 => Some(&[10611301, 10611302, 10611303]),
+            1061131 => Some(&[10611311, 10611312, 10611313]),
+            1061132 => Some(&[10611321, 10611322, 10611323]),
             106141 => Some(&[10614101, 10614102]),
             106151 => Some(&[10615101, 10615102]),
             1061511 => Some(&[10615111, 10615112]),

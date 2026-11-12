@@ -1,6 +1,10 @@
+#[cfg(test)]
+mod achievements_integration;
+pub mod artifact_growth;
 pub mod artifact_lifecycle;
 pub mod artifact_payload;
 pub mod artifact_rules;
+pub mod badges;
 pub mod bag;
 #[cfg(test)]
 mod bonuses_integration;
@@ -15,11 +19,14 @@ pub mod extra_rewards;
 mod extra_rewards_integration;
 pub mod favorites;
 pub mod flow;
+#[cfg(test)]
+mod fountain_integration;
 pub mod genius_bonuses;
 pub mod map;
 pub mod middle;
 pub mod outside_rewards;
 pub mod repair;
+pub mod reviews;
 pub mod shop;
 pub mod special_events;
 #[cfg(test)]
@@ -158,7 +165,7 @@ impl RougeManager {
         Ok(rouge_info_from(&start, None))
     }
 
-    /// Catalyst selection. Only catalysts with `unlockType == 0` are available in the base game.
+    /// Catalyst selection follows default, outside-growth and ending unlocks.
     pub async fn select_style(
         self,
         db: &SqlitePool,
@@ -169,10 +176,13 @@ impl RougeManager {
             return Err(AppError::InvalidRequest);
         }
         let tables = config::configs::get();
-        let Some(catalyst) = tables.rouge_style(season, style) else {
+        let Some(_catalyst) = tables.rouge_style(season, style) else {
             return Err(AppError::InvalidRequest);
         };
-        if !tables.rouge_style_is_default_unlocked(catalyst) {
+        let genius = rouge::list_genius(db, self.player_id, season).await?;
+        let passed =
+            database::db::game::rouge_history::passed_endings(db, self.player_id, season).await?;
+        if !reviews::unlocked_styles(tables, season, &genius, &passed).contains(&style) {
             return Err(AppError::InvalidRequest);
         }
         let start = load_original(db, self.player_id, season).await?;
@@ -1125,14 +1135,13 @@ impl RougeManager {
             .map(|state| state.completed_entrusts)
             .unwrap_or_default();
         let entrust_score = completed_entrusts.len() as i32 * const_i32(tables, 1016, 160);
-        let badges = earned_badges(
-            tables,
+        let badge_facts = badges::facts(
+            &run,
             minor + danger + crisis,
-            collection_num,
             crisis,
-            run.spent_coin,
-            details.compositions.values().sum(),
+            completed_entrusts.len() as i32,
         );
+        let badges = badges::evaluate(tables, &badge_facts);
         let badge_score: i32 = badges.iter().map(|badge| badge.score).sum();
 
         let base = minor_score
@@ -1226,7 +1235,7 @@ impl RougeManager {
                 portrait: Some(portrait.unwrap_or(171603)),
                 difficulty: Some(start.difficulty),
                 style: Some(start.style),
-                finish_time: Some(common::time::ServerTime::now_ms() / 1000),
+                finish_time: Some(common::time::ServerTime::now_ms()),
                 team_level: Some(team_progress(run.season, run.team_exp).0),
                 collection_num: Some(collection_num),
                 gain_coin: Some(run.coin + run.spent_coin),
@@ -1825,6 +1834,7 @@ impl RougeManager {
                 }
         };
 
+        let mut revived = 0_i32;
         match expected_kind {
             INTERACT_HEAL => {
                 if params.len() != 3 || params[1] <= 0 || params[2] <= 0 {
@@ -1875,48 +1885,48 @@ impl RougeManager {
                         && (revive_num == 999 || unique.contains(&hero_id));
                     if is_target {
                         life.life = Some(1_000);
+                        revived += 1;
                     }
                 }
             }
             _ => return Err(AppError::InvalidRequest),
         }
 
-        let next_index =
-            next_supported_interactive(&pending.pipeline, pending.index, tables).unwrap_or(-1);
         let encoded = serde_json::to_string(&team)?;
-        let event_id = (next_index < 0).then(|| current_node_event(&run)).flatten();
-        let middle = updated_entrust(
+        let mut next = run.clone();
+        next.team = encoded;
+        next.battle_interactive = pending.pipeline.clone();
+        let mut detail = flow::details(&next);
+        detail.achievements.map_revives = detail.achievements.map_revives.saturating_add(revived);
+        next.details = serde_json::to_string(&detail)?;
+        flow::advance(&mut next, pending.index as usize + 1)?;
+        flow::queue_level_recruit(&mut next, run.team_exp);
+        let event_id = (next.interactive_index < 0)
+            .then(|| current_node_event(&run))
+            .flatten();
+        next.middle_state = updated_entrust(
             &run,
             EntrustChange {
                 finished_event: event_id,
+                gained_coin: (next.coin - run.coin).max(0),
+                spent_coin: (run.coin - next.coin).max(0),
+                gained_power: (next.power - run.power).max(0),
+                spent_power: (run.power - next.power).max(0),
+                collections: flow::collection_counts(&serde_json::from_str(&next.bag)?)
+                    .values()
+                    .sum::<i32>()
+                    - flow::collection_counts(&serde_json::from_str(&run.bag)?)
+                        .values()
+                        .sum::<i32>(),
                 ..Default::default()
             },
         )?;
-        if !rouge::consume_team_interactive(
-            db,
-            self.player_id,
-            season,
-            &run.team,
-            &encoded,
-            pending.index,
-            next_index,
-            &run.middle_state,
-            &middle,
-            run.node_id,
-            &run.battle_interactive,
-        )
-        .await?
-        {
-            return Err(AppError::InvalidRequest);
-        }
-
-        let run = rouge::get_run(db, self.player_id, season)
-            .await?
-            .ok_or(AppError::InvalidRequest)?;
-        let run = flow::resume(db, run).await?;
+        artifact_lifecycle::prepare(&run, &mut next)?;
+        flow::finish_node(&mut next)?;
+        flow::save_action(db, &run, &mut next).await?;
         Ok((
-            persisted_team(&run).ok_or(AppError::InvalidRequest)?,
-            map_info(&run),
+            persisted_team(&next).ok_or(AppError::InvalidRequest)?,
+            map_info(&next),
         ))
     }
 
@@ -1953,18 +1963,7 @@ pub async fn rouge_outside_info(
     let passed_endings =
         database::db::game::rouge_history::passed_endings(db, user_id, season).await?;
     let favorites = favorites::load(db, user_id, season).await?;
-    let cached: Option<String> = sqlx::query_scalar(
-        "SELECT result_info FROM user_rouge_settlement WHERE user_id = ? AND season = ?",
-    )
-    .bind(user_id)
-    .bind(season)
-    .fetch_optional(db)
-    .await?;
-    let review: Vec<sonettobuf::RougeReviewInfo> = cached
-        .and_then(|raw| serde_json::from_str::<sonettobuf::RougeResultInfo>(&raw).ok())
-        .and_then(|result| result.review_info)
-        .into_iter()
-        .collect();
+    let reports = reviews::load(db, user_id, season).await?;
     Ok(GetRougeOutsideInfoReply {
         rouge_info: Some(RougeOutsideInfo {
             season: Some(season),
@@ -1973,13 +1972,17 @@ pub async fn rouge_outside_info(
             point: Some(outside.point),
             have_get_point: Some(outside.have_get_point),
             bonus: Some(outside_rewards::bonus_info(db, user_id, season).await?),
-            review: review.clone(),
+            review: reports.reviews,
             game_record_info: Some(RougeGameRecordInfo {
                 pass_entrust_id,
                 max_difficulty: Some(cleared.into_iter().max().unwrap_or(0)),
                 pass_end_id: passed_endings,
                 pass_collections: favorites.pass_collections,
                 unlock_story_ids: favorites.unlock_story_ids,
+                pass_event_id: reports.pass_event_ids,
+                pass_layer_id: reports.pass_layer_ids,
+                unlock_illustration_ids: reports.unlock_illustration_ids,
+                last_game_time: Some(reports.last_game_time),
                 ..Default::default()
             }),
             is_genius_new_stage: Some(false),
@@ -3256,11 +3259,7 @@ fn offered_rewards(tables: &config::GameDB, difficulty: i32) -> Vec<i32> {
     ids
 }
 
-/// Badges earned this run.
-///
-/// Only the triggers that can be derived from run state are evaluated:
-/// 1 = battles fought, 2 = artefacts obtained, 8 = crisis battles won.
-/// The remaining triggers need combat telemetry that is not tracked yet.
+#[cfg(test)]
 fn earned_badges(
     tables: &config::GameDB,
     battles: i32,
@@ -3269,25 +3268,17 @@ fn earned_badges(
     spent_coin: i32,
     compositions: i32,
 ) -> Vec<&config::rouge_badge::RougeBadge> {
-    let mut earned = Vec::new();
-    for badge in tables.rouge_badge.iter() {
-        if badge.season != 1 {
-            continue;
-        }
-        let need: i32 = badge.trigger_param.trim().parse().unwrap_or(i32::MAX);
-        let have = match badge.trigger {
-            1 => battles,
-            2 => collections,
-            3 => compositions,
-            5 => spent_coin,
-            8 => crisis_battles,
-            _ => continue,
-        };
-        if have >= need {
-            earned.push(badge);
-        }
-    }
-    earned
+    badges::evaluate(
+        tables,
+        &badges::Facts {
+            battles,
+            collections,
+            crisis_battles,
+            spent_coin,
+            compositions,
+            ..Default::default()
+        },
+    )
 }
 
 /// Layer bonus from `rouge_const` 1015 (`1#750|2#1750|...`).
@@ -3486,6 +3477,7 @@ async fn start_run(
     details.passed_endings = Some(passed_endings);
     run.details = serde_json::to_string(&details)?;
     artifact_lifecycle::initialize(&mut run)?;
+    badges::observe_roster(&mut run)?;
     flow::save(db, &before, &run).await?;
     Ok(run)
 }
@@ -3987,6 +3979,7 @@ mod original_tests {
         // the same target position here to continue testing the middle board.
         let board = middle_board(config::configs::get(), 111).unwrap();
         let run = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
+        let expected_stats = current_layer_stats(&run).unwrap();
         let position = RougeRunPosition {
             map_type: MAP_TYPE_MIDDLE,
             middle_layer_id: board.id,
@@ -4040,7 +4033,15 @@ mod original_tests {
         assert_eq!(layer.cur_stage, Some(0));
         let run = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
         assert_eq!(run.step_count, resolved.len() as i32);
-        assert!(run.minor_count + run.danger_count + run.crisis_count > 0);
+        assert_eq!(
+            (run.minor_count, run.danger_count, run.crisis_count),
+            (
+                expected_stats.minor,
+                expected_stats.danger,
+                expected_stats.crisis
+            ),
+            "the random route archives exactly its resolved battles"
+        );
     }
 
     #[tokio::test]
@@ -5573,8 +5574,8 @@ mod original_tests {
         let tables = config::configs::get();
         // No battles, one artefact: only the 40-artefact badge is out of reach.
         assert!(earned_badges(tables, 0, 0, 0, 0, 0).is_empty());
-        // 12 battles satisfies the "kick the door" badge (trigger 1, param 12).
-        let badges = earned_badges(tables, 12, 0, 0, 0, 0);
+        // The documented "over 12" threshold is first met at 13 battles.
+        let badges = earned_badges(tables, 13, 0, 0, 0, 0);
         assert!(badges.iter().any(|badge| badge.trigger == 1));
         // 40 artefacts satisfies trigger 2.
         assert!(

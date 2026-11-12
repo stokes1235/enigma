@@ -44,11 +44,16 @@ pub fn prepare(expected: &RougeRun, run: &mut RougeRun) -> Result<(), AppError> 
     // Early local saves used {} for an empty bag. Do not invent ownership or
     // retroactively issue acquisition gifts when that legacy state is unknown.
     let Ok(mut previous) = serde_json::from_str::<RunBag>(&expected.bag) else {
+        if let Ok(current) = serde_json::from_str::<RunBag>(&run.bag) {
+            super::badges::observe_bag(run, &current)?;
+        }
         return Ok(());
     };
+    super::badges::observe_bag(run, &previous)?;
     let mut handled = BTreeSet::new();
     for _ in 0..64 {
         let current: RunBag = serde_json::from_str(&run.bag)?;
+        super::badges::observe_bag(run, &current)?;
         let old = owned(&previous);
         let new = owned(&current);
         let losses: Vec<_> = old

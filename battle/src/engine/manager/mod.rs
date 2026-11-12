@@ -751,6 +751,11 @@ impl BattleManagers {
                 .shield_carrier_uid(changes.target_uid)
                 .unwrap_or_default();
         }
+        crate::rouge::record_hp(
+            self,
+            &changes,
+            matches!(plan.command, hp::HpCommand::Heal(_)),
+        );
         HpCommit {
             changes,
             before_hp_markers,

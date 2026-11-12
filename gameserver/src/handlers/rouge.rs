@@ -139,11 +139,17 @@ pub async fn on_rouge_get_reddots(
     let season = msg.season.ok_or(AppError::InvalidRequest)?;
     let progress =
         crate::logic::rouge::favorites::load(ctx.state.db, ctx.player()?.id, season).await?;
+    let reports =
+        crate::logic::rouge::reviews::load(ctx.state.db, ctx.player()?.id, season).await?;
+    let mut dots = progress.reddots();
+    if let Some(cg) = dots.iter_mut().find(|dot| dot.r#type == Some(3)) {
+        cg.ids = reports.new_illustration_ids;
+    }
     ctx.send_reply(
         CmdId::RougeGetNewReddotInfoCmd,
         sonettobuf::RougeGetNewReddotInfoReply {
             season: Some(season),
-            new_reddots: progress.reddots(),
+            new_reddots: dots,
         },
         0,
         req.up_tag,
@@ -159,15 +165,25 @@ pub async fn on_rouge_mark_reddot(
     let season = msg.season.ok_or(AppError::InvalidRequest)?;
     let kind = msg.r#type.ok_or(AppError::InvalidRequest)?;
     let id = msg.id.ok_or(AppError::InvalidRequest)?;
-    if !database::db::game::rouge_favorites::mark_seen(
-        ctx.state.db,
-        ctx.player()?.id,
-        season,
-        kind,
-        id,
-    )
-    .await?
-    {
+    let marked = if kind == 3 {
+        crate::logic::rouge::reviews::mark_illustration_seen(
+            ctx.state.db,
+            ctx.player()?.id,
+            season,
+            id,
+        )
+        .await?
+    } else {
+        database::db::game::rouge_favorites::mark_seen(
+            ctx.state.db,
+            ctx.player()?.id,
+            season,
+            kind,
+            id,
+        )
+        .await?
+    };
+    if !marked {
         return Err(AppError::InvalidRequest);
     }
     ctx.send_reply(
