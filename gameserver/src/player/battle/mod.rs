@@ -162,6 +162,18 @@ struct BattleCheckpoint {
     rounds: Vec<CommittedRound>,
     #[serde(default)]
     pending_cloth_skill_opers: Vec<UseClothSkillRequest>,
+    #[serde(default)]
+    rouge_snapshot: Option<RougeBattleSnapshot>,
+}
+
+/// Freeze both the engine-only context and the protocol attributes/life used
+/// at entry. A later bag change must not alter any part of replayed combat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RougeBattleSnapshot {
+    fight: sonettobuf::Fight,
+    ex_attributes: Vec<(i64, sonettobuf::HeroExAttribute)>,
+    sp_attributes: Vec<(i64, sonettobuf::HeroSpAttribute)>,
+    context: Option<::battle::rouge::RougeContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +211,7 @@ pub struct ActiveBattle {
     pub(crate) act229_context: Option<Act229BattleContext>,
     pub(crate) rounds: Vec<CommittedRound>,
     pub(crate) pending_cloth_skill_opers: Vec<UseClothSkillRequest>,
+    pub(crate) rouge_snapshot: Option<RougeBattleSnapshot>,
 }
 
 #[cfg(test)]
@@ -229,6 +242,7 @@ impl Default for ActiveBattle {
             act229_context: None,
             rounds: Vec::new(),
             pending_cloth_skill_opers: Vec::new(),
+            rouge_snapshot: None,
         }
     }
 }
@@ -465,6 +479,13 @@ impl ActiveBattle {
         let assist_boss_level = attacker
             .and_then(|team| team.assist_boss.as_ref())
             .and_then(|boss| boss.level);
+        let rouge_snapshot =
+            (chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID).then(|| RougeBattleSnapshot {
+                fight: built.fight.clone(),
+                ex_attributes: built.ex_attributes.clone(),
+                sp_attributes: built.sp_attributes.clone(),
+                context: built.rouge.clone(),
+            });
         let runtime = ::battle::Battle::start(
             ::battle::catalog::BattleCatalog::new(config::configs::get()),
             built,
@@ -497,6 +518,7 @@ impl ActiveBattle {
             act229_context,
             rounds: Vec::new(),
             pending_cloth_skill_opers: Vec::new(),
+            rouge_snapshot,
         })
     }
 
@@ -523,7 +545,7 @@ impl ActiveBattle {
                 AppError::InvalidBattleCheckpoint("start request has no fight group".into())
             })?;
         let use_record = checkpoint.start_request.use_record.unwrap_or(false);
-        let built = if let Some(context) = checkpoint.tower_context {
+        let mut built = if let Some(context) = checkpoint.tower_context {
             crate::logic::battle_setup::tower::build_fight(
                 pool,
                 player_id,
@@ -552,6 +574,17 @@ impl ActiveBattle {
             )
             .await?
         };
+        if let Some(snapshot) = &checkpoint.rouge_snapshot {
+            if checkpoint.chapter_id != crate::rouge::fight::ROUGE_CHAPTER_ID {
+                return Err(AppError::InvalidBattleCheckpoint(
+                    "Rouge snapshot on another chapter".into(),
+                ));
+            }
+            built.fight = snapshot.fight.clone();
+            built.ex_attributes = snapshot.ex_attributes.clone();
+            built.sp_attributes = snapshot.sp_attributes.clone();
+            built.rouge = snapshot.context.clone();
+        }
         let mut active = Self::from_built_with_seed(
             episode_id,
             record.battle_id,
@@ -576,6 +609,7 @@ impl ActiveBattle {
             act229_context: self.act229_context,
             rounds: self.rounds.clone(),
             pending_cloth_skill_opers: self.pending_cloth_skill_opers.clone(),
+            rouge_snapshot: self.rouge_snapshot.clone(),
         })?)
     }
 

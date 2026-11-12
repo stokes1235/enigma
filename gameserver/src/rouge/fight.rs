@@ -220,14 +220,22 @@ pub async fn settle_in_transaction(
         // only in its result; persisting all-zero life would strand the retry.
         if won {
             run.team = serde_json::to_string(&team)?;
+            let before_victory = run.clone();
+            crate::logic::rouge::flow::apply_map_effects(
+                &mut run,
+                crate::logic::rouge::artifact_rules::MapTrigger::BattleWin,
+            )?;
+            crate::logic::rouge::artifact_lifecycle::prepare(&before_victory, &mut run)?;
+            team = serde_json::from_str(&run.team)?;
         }
         if won {
             run.terminal_state = 1;
         } else {
             run.retry_num += 1;
         }
-        sqlx::query("UPDATE user_rouge_run SET terminal_state = ?, retry_num = ?, team = ? WHERE user_id = ? AND season = 1 AND terminal_state = 0")
-            .bind(run.terminal_state).bind(run.retry_num).bind(&run.team).bind(player_id).execute(&mut **tx).await?;
+        sqlx::query("UPDATE user_rouge_run SET terminal_state = ?, retry_num = ?, team = ?, bag = ?, details = ?, coin = ?, power = ?, power_limit = ?, middle_state = ? WHERE user_id = ? AND season = 1 AND terminal_state = 0")
+            .bind(run.terminal_state).bind(run.retry_num).bind(&run.team).bind(&run.bag).bind(&run.details)
+            .bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(player_id).execute(&mut **tx).await?;
         if won {
             sqlx::query("UPDATE user_rouge_start SET state = 5 WHERE user_id = ? AND season = 1 AND state = 4")
                 .bind(player_id).execute(&mut **tx).await?;
@@ -311,13 +319,21 @@ pub async fn settle_in_transaction(
         crate::logic::rouge::flow::freeze_battle_reward(&mut run, node.event_id)?;
         let before_resources = run.clone();
         crate::logic::rouge::flow::after_victory(&mut run, node.node_type)?;
-        run.middle_state = crate::logic::rouge::automatic_fight_resource_update(
+        let count_items = |bag: &str| {
+            serde_json::from_str::<crate::logic::rouge::bag::RunBag>(bag)
+                .ok()
+                .map(|bag| crate::logic::rouge::artifact_lifecycle::owned(&bag).len() as i32)
+                .unwrap_or_default()
+        };
+        run.middle_state = crate::logic::rouge::automatic_fight_outcome_update(
             &before_resources,
             (run.coin - before_resources.coin).max(0),
             (run.power - before_resources.power).max(0),
+            (count_items(&run.bag) - count_items(&before_resources.bag)).max(0),
         )?;
-        sqlx::query("UPDATE user_rouge_run SET team = ?, coin = ?, power = ?, power_limit = ?, middle_state = ? WHERE user_id = ? AND season = 1")
-            .bind(&run.team).bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(player_id).execute(&mut **tx).await?;
+        crate::logic::rouge::artifact_lifecycle::prepare(&before_resources, &mut run)?;
+        sqlx::query("UPDATE user_rouge_run SET team = ?, bag = ?, coin = ?, power = ?, power_limit = ?, middle_state = ? WHERE user_id = ? AND season = 1")
+            .bind(&run.team).bind(&run.bag).bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(player_id).execute(&mut **tx).await?;
         persisted_team = serde_json::from_str(&run.team)?;
         sqlx::query("UPDATE user_rouge_run SET details = ? WHERE user_id = ? AND season = 1")
             .bind(&run.details)
@@ -364,7 +380,9 @@ pub async fn settle_in_transaction(
     }
 
     if won && final_node && pipeline.is_none() {
+        let before_safe_zone = run.clone();
         crate::logic::rouge::flow::finish_node(&mut run)?;
+        crate::logic::rouge::artifact_lifecycle::prepare(&before_safe_zone, &mut run)?;
         sqlx::query("UPDATE user_rouge_run SET map_type = ?, middle_layer_id = ?, position_index = ?, middle_state = ?, coin = ?, power = ?, power_limit = ?, battle_interactive = ?, interactive_index = ?, team = ?, bag = ?, details = ? WHERE user_id = ? AND season = 1")
             .bind(run.map_type).bind(run.middle_layer_id).bind(run.position_index).bind(&run.middle_state)
             .bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.battle_interactive).bind(run.interactive_index)

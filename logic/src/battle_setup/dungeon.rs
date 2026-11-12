@@ -50,19 +50,93 @@ pub async fn build_fight(
         let start = database::db::game::rouge::get_or_create_start(db, player_id, 1).await?;
         let mut rates = crate::rouge::flow::attribute_rates(&start, &run);
         let bag: crate::rouge::bag::RunBag = serde_json::from_str(&run.bag)?;
-        let effects =
-            crate::rouge::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin);
+        let effects = crate::rouge::artifact_rules::evaluate_battle_with_state(
+            config::configs::get(),
+            &bag,
+            run.coin,
+            &crate::rouge::flow::details(&run).artifact_state,
+        );
         for (id, value) in &effects.attribute_rates {
             *rates.entry(*id).or_default() += value;
         }
+        let mut protocol_rates = rates.clone();
+        let genesis = protocol_rates.remove(&217).unwrap_or_default();
         let unsupported = crate::rouge::combat::apply(
             &mut built.fight,
             &mut built.ex_attributes,
             &mut built.sp_attributes,
-            &rates,
+            &protocol_rates,
             &effects.slot_attribute_rates,
             &team,
         );
+        let mut context = battle::rouge::RougeContext::default();
+        if let Some(attacker) = &built.fight.attacker {
+            for entity in attacker.entitys.iter().chain(&attacker.sub_entitys) {
+                if let Some(uid) = entity.uid {
+                    let slot = team
+                        .battle_hero_list
+                        .iter()
+                        .find(|hero| hero.hero_id == entity.model_id)
+                        .and_then(|hero| hero.index);
+                    let amount = genesis
+                        + slot
+                            .and_then(|slot| effects.slot_attribute_rates.get(&slot))
+                            .and_then(|rates| rates.get(&217))
+                            .copied()
+                            .unwrap_or_default();
+                    if amount != 0 {
+                        context.extra_attributes.push((uid, 217, amount));
+                    }
+                    if slot == Some(1) {
+                        context.first_slot_uid = Some(uid);
+                    }
+                }
+            }
+        }
+        for item in bag
+            .items
+            .iter()
+            .filter(|item| crate::rouge::artifact_rules::is_active(item))
+        {
+            let count2 = crate::rouge::artifact_rules::inlay_counters(config::configs::get(), item)
+                .get("count2")
+                .copied()
+                .unwrap_or_default();
+            let only_support_below = crate::rouge::artifact_rules::only_support_below(item, &bag);
+            context.artefacts.push(battle::rouge::Artefact {
+                uid: item.uid,
+                item_id: item.item_id,
+                count2,
+                only_support_below,
+            });
+        }
+        fn predicate(
+            value: crate::rouge::artifact_rules::AttackPredicate,
+        ) -> battle::rouge::AttackPredicate {
+            use crate::rouge::artifact_rules::AttackPredicate as P;
+            use battle::rouge::AttackPredicate as B;
+            match value {
+                P::RankAtLeast(rank) => B::RankAtLeast(rank),
+                P::Support => B::Support,
+                P::ExtraAction => B::ExtraAction,
+                P::HasBullet => B::HasBullet,
+                P::NonUltimate => B::NonUltimate,
+                P::Ultimate => B::Ultimate,
+                P::All(values) => B::All(values.into_iter().map(predicate).collect()),
+            }
+        }
+        context.conditional_modifiers =
+            crate::rouge::artifact_rules::attack_modifiers(config::configs::get(), &bag)
+                .into_iter()
+                .map(|rule| battle::rouge::ConditionalModifier {
+                    source_uid: rule.source_uid,
+                    item_id: rule.item_id,
+                    predicate: predicate(rule.predicate),
+                    attr_id: rule.attr_id,
+                    value: rule.value,
+                })
+                .collect();
+        built.rouge = Some(context);
         if !unsupported.is_empty() {
             tracing::debug!(?unsupported, "unsupported Rouge numeric attribute fields");
         }

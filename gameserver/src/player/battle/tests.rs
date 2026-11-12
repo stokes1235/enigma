@@ -248,6 +248,46 @@ fn active_fight_reconnects_from_its_committed_checkpoint() {
         .unwrap();
 }
 
+#[test]
+fn rouge_checkpoint_freezes_attributes_and_context_when_the_bag_changes() {
+    std::thread::Builder::new().stack_size(32*1024*1024).spawn(|| {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let data=format!("{}/../data/excel2json",env!("CARGO_MANIFEST_DIR"));config::init(&data).unwrap();
+            let pool=SqlitePool::connect("sqlite::memory:").await.unwrap();database::run_migrations(&pool).await.unwrap();
+            sqlx::query("INSERT INTO users (id,username,created_at,updated_at) VALUES (9,'rouge-reconnect',0,0)").execute(&pool).await.unwrap();
+            database::db::starter_data::load_all_starter_data(&pool,9).await.unwrap();
+            // Starter progression does not grant an owned hero roster.
+            sqlx::query("INSERT INTO heroes (uid,user_id,hero_id,create_time,level,exp,rank,breakthrough,skin,faith,active_skill_level,ex_skill_level) VALUES (9003003,9,3003,0,1,0,1,0,0,0,1,0)").execute(&pool).await.unwrap();
+            let hero=3003;
+            let uid:i64=sqlx::query_scalar("SELECT uid FROM heroes WHERE user_id=9 AND hero_id=?").bind(hero).fetch_one(&pool).await.unwrap();
+            let manager=crate::logic::rouge::RougeManager::new(9);
+            manager.select_difficulty(&pool,1,1,&[],false).await.unwrap();manager.select_style(&pool,1,1).await.unwrap();
+            manager.select_heroes(&pool,1,&[hero],0).await.unwrap();
+            let before=database::db::game::rouge::get_run(&pool,9,1).await.unwrap().unwrap();
+            let mut after=before.clone();let mut bag=crate::logic::rouge::bag::RunBag::from_layout("8#8","").unwrap();
+            let heart=bag.add(8330020).unwrap();bag.place(heart.uid,0,0,0).unwrap();
+            after.bag=serde_json::to_string(&bag).unwrap();crate::logic::rouge::flow::save_action(&pool,&before,&mut after).await.unwrap();
+            let episode=config::configs::get().rouge_fight_episode(101104).unwrap();
+            let battle=config::configs::get().episode.get(episode).unwrap().battle_id;
+            let mut active=ActiveBattle::prepare(&pool,9,episode,battle,StartDungeonRequest {
+                chapter_id:Some(crate::rouge::fight::ROUGE_CHAPTER_ID),episode_id:Some(episode),
+                fight_group:Some(sonettobuf::FightGroup {hero_list:vec![uid],..Default::default()}),..Default::default()
+            }).await.unwrap();
+            assert!(active.rouge_snapshot.as_ref().unwrap().context.as_ref().unwrap().extra_attributes.contains(&(uid,217,1000)));
+            active.activate(&pool,9,&RewardSet::default()).await.unwrap();
+            let expected=active.reconnect_reply();let start=active.start_reply();let cards=active.card_info_push();
+            let before=database::db::game::rouge::get_run(&pool,9,1).await.unwrap().unwrap();let mut after=before.clone();
+            bag.remove(heart.uid).unwrap();let basket=bag.add(8320049).unwrap();bag.place(basket.uid,0,0,0).unwrap();
+            after.bag=serde_json::to_string(&bag).unwrap();after.coin=10000;
+            crate::logic::rouge::flow::save_action(&pool,&before,&mut after).await.unwrap();
+            let record=battle::load_active_fight(&pool,9).await.unwrap().unwrap();
+            let restored=ActiveBattle::restore(&pool,9,record).await.unwrap();
+            assert_eq!(restored.reconnect_reply(),expected);assert_eq!(restored.start_reply(),start);assert_eq!(restored.card_info_push(),cards);
+            assert_eq!(restored.rouge_snapshot.as_ref().unwrap().context,active.rouge_snapshot.as_ref().unwrap().context);
+        });
+    }).unwrap().join().unwrap();
+}
+
 #[tokio::test]
 async fn malformed_checkpoint_is_the_only_discardable_restore_error() {
     let legacy: BattleCheckpoint = serde_json::from_str(

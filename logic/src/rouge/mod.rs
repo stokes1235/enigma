@@ -1,3 +1,4 @@
+pub mod artifact_lifecycle;
 pub mod artifact_payload;
 pub mod artifact_rules;
 pub mod bag;
@@ -5,7 +6,10 @@ pub mod bag;
 mod bonuses_integration;
 mod collection_shapes;
 pub mod combat;
+pub mod ending_rules;
 mod entrust_effects;
+#[cfg(test)]
+mod extended_integration;
 pub mod extra_rewards;
 #[cfg(test)]
 mod extra_rewards_integration;
@@ -13,6 +17,7 @@ pub mod flow;
 pub mod genius_bonuses;
 pub mod map;
 pub mod middle;
+pub mod repair;
 pub mod shop;
 
 use crate::error::AppError;
@@ -50,7 +55,10 @@ impl RougeManager {
         let run = match rouge::get_run(db, self.player_id, season).await? {
             Some(mut run) => {
                 let mut detail = flow::details(&run);
-                if detail.outside_genius.is_none() || detail.safe_zone_recovery.is_none() {
+                if detail.outside_genius.is_none()
+                    || detail.safe_zone_recovery.is_none()
+                    || detail.passed_endings.is_none()
+                {
                     let expected = run.clone();
                     if detail.outside_genius.is_none() {
                         detail.outside_genius =
@@ -59,8 +67,18 @@ impl RougeManager {
                     detail.safe_zone_recovery = config::configs::get()
                         .rouge_style(season, start.style)
                         .map(|style| style.power);
+                    if detail.passed_endings.is_none() {
+                        detail.passed_endings = Some(
+                            database::db::game::rouge_history::passed_endings(
+                                db,
+                                self.player_id,
+                                season,
+                            )
+                            .await?,
+                        );
+                    }
                     run.details = serde_json::to_string(&detail)?;
-                    flow::save(db, &expected, &run).await?;
+                    flow::save_action(db, &expected, &mut run).await?;
                 }
                 Some(flow::resume(db, run).await?)
             }
@@ -438,7 +456,7 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
-        flow::save(db, &run, &next).await?;
+        flow::save_action(db, &run, &mut next).await?;
         Ok(map_info(&next))
     }
 
@@ -506,6 +524,13 @@ impl RougeManager {
         }
         let tables = config::configs::get();
         let mut state = middle_state(&run);
+        if matches!(selection, 1410201 | 1410202 | 1410301 | 1410302)
+            && state.pieces.iter().any(|piece| {
+                matches!(piece.id, Some(1410201 | 1410301)) && piece.finish == Some(true)
+            })
+        {
+            return Err(AppError::InvalidRequest);
+        }
         let piece = state
             .pieces
             .iter_mut()
@@ -526,7 +551,12 @@ impl RougeManager {
             .rouge_piece_select
             .get(selection)
             .ok_or(AppError::InvalidRequest)?;
-        if select.unlock_type != 0 || select.active_type != 0 || piece.finish == Some(true) {
+        // activeType gates visibility (and its unlock animation); unlockType
+        // separately gates choosing a visible option. Validate both.
+        if !ending_rules::is_unlocked(&run, select.unlock_type, &select.unlock_param)
+            || !ending_rules::is_unlocked(&run, select.active_type, &select.active_param)
+            || piece.finish == Some(true)
+        {
             return Err(AppError::InvalidRequest);
         }
         let mut details = flow::details(&run);
@@ -547,6 +577,10 @@ impl RougeManager {
                 id
             }
             3 => 0,
+            4 | 5 if matches!(selection, 1002 | 1003) => {
+                repair::open(&run, piece, selection)?;
+                0
+            }
             0 => {
                 piece.select_id = Some(selection);
                 piece.finish = Some(true);
@@ -586,14 +620,30 @@ impl RougeManager {
             }
             _ => return Err(AppError::InvalidRequest),
         };
-        piece.trigger_str = Some(serde_json::json!({"displaceMaxNum":0,"displaceNum":0,"dropId":0,"endEpisodeId":details.end_episode,"entrustId":entrust_id,"fightFail":false,"repairRandomNum":0}).to_string());
+        let mut trigger: repair::Trigger = piece
+            .trigger_str
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        trigger.other.insert("dropId".into(), serde_json::json!(0));
+        trigger.other.insert(
+            "endEpisodeId".into(),
+            serde_json::json!(details.end_episode),
+        );
+        trigger
+            .other
+            .insert("entrustId".into(), serde_json::json!(entrust_id));
+        trigger
+            .other
+            .insert("fightFail".into(), serde_json::json!(false));
+        piece.trigger_str = Some(serde_json::to_string(&trigger)?);
         let encoded = serde_json::to_string(&state)?;
         next_run.middle_state = encoded;
         if select.trigger_type == 6 {
             next_run.details = serde_json::to_string(&details)?;
         }
         flow::queue_level_recruit(&mut next_run, run.team_exp);
-        flow::save(db, &run, &next_run).await?;
+        flow::save_action(db, &run, &mut next_run).await?;
         let run = rouge::get_run(db, self.player_id, season)
             .await?
             .ok_or(AppError::InvalidRequest)?;
@@ -628,7 +678,21 @@ impl RougeManager {
         }
 
         let tables = config::configs::get();
-        if tables.rouge_layer.iter().all(|row| row.id != next_layer) {
+        let next_config = tables
+            .rouge_layer
+            .get(next_layer)
+            .ok_or(AppError::InvalidRequest)?;
+        let middle_config = tables
+            .rouge_middle_layer
+            .get(run.middle_layer_id)
+            .ok_or(AppError::InvalidRequest)?;
+        if !ending_rules::is_unlocked(&run, next_config.unlock_type, &next_config.unlock_param)
+            || !ending_rules::is_unlocked(
+                &run,
+                middle_config.leave_pos_unlock_type,
+                &middle_config.leave_pos_unlock_param,
+            )
+        {
             return Err(AppError::InvalidRequest);
         }
 
@@ -708,7 +772,7 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
-        flow::save(db, &run, &next).await?;
+        flow::save_action(db, &run, &mut next).await?;
         let run = rouge::get_run(db, self.player_id, season)
             .await?
             .ok_or(AppError::InvalidRequest)?;
@@ -782,30 +846,14 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
-        if !rouge::apply_shop_purchase(
-            db,
-            self.player_id,
-            season,
-            &bag_json,
-            &shop_json,
-            run.coin - total,
-            run.power,
-            total,
-            &run.bag,
-            &run.shop,
-            run.coin,
-            &run.middle_state,
-            &middle,
-        )
-        .await?
-        {
-            return Err(AppError::InvalidRequest);
-        }
-
-        let run = rouge::get_run(db, self.player_id, season)
-            .await?
-            .ok_or(AppError::InvalidRequest)?;
-        Ok((map_info(&run), added_items))
+        let mut next = run.clone();
+        next.bag = bag_json;
+        next.shop = shop_json;
+        next.coin -= total;
+        next.spent_coin = next.spent_coin.saturating_add(total);
+        next.middle_state = middle;
+        flow::save_action(db, &run, &mut next).await?;
+        Ok((map_info(&next), added_items))
     }
 
     /// Leaves a shop and resolves its map event so movement may continue.
@@ -1110,6 +1158,8 @@ impl RougeManager {
             // report the cumulative spend rather than the remaining balance.
             consume_coin: Some(run.spent_coin),
             consume_power: Some(details.consume_power),
+            repair_shop_num: Some(details.repair_shop_num),
+            displace_num: Some(details.displace_num),
             step_num: Some(steps),
             final_score: Some(final_score),
             add_point: Some(add_point),
@@ -1469,29 +1519,14 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
-        if !rouge::consume_drop_with_entrust(
-            db,
-            self.player_id,
-            season,
-            &run.bag,
-            &encoded,
-            pending.index,
-            run.interactive_refresh,
-            next,
-            &run.middle_state,
-            &middle,
-            run.node_id,
-            &run.battle_interactive,
-        )
-        .await?
-        {
-            return Err(AppError::InvalidRequest);
-        }
-        let run = rouge::get_run(db, self.player_id, season)
-            .await?
-            .ok_or(AppError::InvalidRequest)?;
-        let run = flow::resume(db, run).await?;
-        Ok((map_info(&run), placed, warehouse, updated))
+        let mut after = run.clone();
+        after.bag = encoded;
+        after.interactive_index = next;
+        after.middle_state = middle;
+        artifact_lifecycle::prepare(&run, &mut after)?;
+        flow::finish_node(&mut after)?;
+        flow::save_action(db, &run, &mut after).await?;
+        Ok((map_info(&after), placed, warehouse, updated))
     }
 
     /// Completes the post-battle recruitment and enters the next map state.
@@ -1552,8 +1587,9 @@ impl RougeManager {
         run.team = serde_json::to_string(&team)?;
         run.battle_interactive = pending.pipeline;
         flow::advance(&mut run, pending.index as usize + 1)?;
+        artifact_lifecycle::prepare(&expected, &mut run)?;
         flow::finish_node(&mut run)?;
-        flow::save(db, &expected, &run).await?;
+        flow::save_action(db, &expected, &mut run).await?;
         Ok((
             persisted_team(&run).ok_or(AppError::InvalidRequest)?,
             map_info(&run),
@@ -1685,8 +1721,9 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
+        artifact_lifecycle::prepare(&run, &mut next)?;
         flow::finish_node(&mut next)?;
-        flow::save(db, &run, &next).await?;
+        flow::save_action(db, &run, &mut next).await?;
         Ok((map_info(&next), collection_ids, items, layouts))
     }
 
@@ -1865,6 +1902,8 @@ pub async fn rouge_outside_info(
     let genius_ids = rouge::list_genius(db, user_id, season).await?;
     let pass_entrust_id = rouge::completed_entrusts(db, user_id, season).await?;
     let cleared = rouge::cleared_difficulties(db, user_id, season).await?;
+    let passed_endings =
+        database::db::game::rouge_history::passed_endings(db, user_id, season).await?;
     let cached: Option<String> = sqlx::query_scalar(
         "SELECT result_info FROM user_rouge_settlement WHERE user_id = ? AND season = ?",
     )
@@ -1889,11 +1928,7 @@ pub async fn rouge_outside_info(
             game_record_info: Some(RougeGameRecordInfo {
                 pass_entrust_id,
                 max_difficulty: Some(cleared.into_iter().max().unwrap_or(0)),
-                pass_end_id: review
-                    .iter()
-                    .filter_map(|review| review.end_id)
-                    .filter(|id| *id > 0)
-                    .collect(),
+                pass_end_id: passed_endings,
                 ..Default::default()
             }),
             is_genius_new_stage: Some(false),
@@ -2164,6 +2199,7 @@ fn rouge_info_from(start: &RougeStart, run: Option<&RougeRun>) -> RougeInfo {
         retry_num: Some(run.map(|run| run.retry_num).unwrap_or_default()),
         talent_point: Some(run.map(flow::talent_points).unwrap_or_default()),
         talent_tree: run.map(|run| flow::talent_tree(start, run)),
+        effect_info: run.map(flow::effect_info).unwrap_or_default(),
         end_id: Some(run.map(|run| flow::details(run).end_id).unwrap_or_default()),
         map_info: run.map(map_info),
         team_info: Some(team_info),
@@ -2460,6 +2496,27 @@ fn drop_state(run: &RougeRun, drop_id: i32, tables: &config::GameDB) -> Option<D
             offers.push(selected?);
         }
     }
+    if row.select_count > 0 && reward.disk_choices > 0 {
+        use rand::SeedableRng;
+        let mut pool: Vec<i32> = artifact_rules::base_item_ids()
+            .iter()
+            .copied()
+            .filter(|id| collection_shapes::is_enchant_item(*id) && !offers.contains(id))
+            .collect();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(
+            run.seed as u64
+                ^ (run.node_id as u64).rotate_left(9)
+                ^ (drop_id as u64).rotate_left(23)
+                ^ refresh.wrapping_mul(7919),
+        );
+        for _ in 0..reward.disk_choices.min(8) {
+            if pool.is_empty() {
+                break;
+            }
+            let index = rand::Rng::random_range(&mut rng, 0..pool.len());
+            offers.push(pool.swap_remove(index));
+        }
+    }
     let select_count = row.select_count + reward.extra_select;
     (offers.len() >= select_count as usize).then_some(DropState {
         offers,
@@ -2522,53 +2579,7 @@ fn interactive_json(
 }
 
 fn choice_is_unlocked(run: &RougeRun, choice: &config::rouge_choice::RougeChoice) -> bool {
-    let parse = || choice.unlock_param.trim().parse::<i32>().ok();
-    let bag = || serde_json::from_str::<bag::RunBag>(&run.bag).ok();
-    let team = || persisted_team(run);
-    match choice.unlock_type {
-        0 => true,
-        // PossessCollection
-        1 => parse().is_some_and(|item_id| {
-            bag().is_some_and(|bag| bag.items.iter().any(|item| item.item_id == item_id))
-        }),
-        // PossessCoin
-        2 => parse().is_some_and(|need| run.coin >= need),
-        // PossessHero
-        3 => parse().is_some_and(|need| {
-            team().is_some_and(|team| team.hero_life_list.len() >= need.max(0) as usize)
-        }),
-        // PossessPower
-        4 => parse().is_some_and(|need| run.power >= need),
-        // PossessCollectionCount
-        5 => parse()
-            .is_some_and(|need| bag().is_some_and(|bag| bag.items.len() >= need.max(0) as usize)),
-        // DeadHeroNum
-        17 => parse().is_some_and(|need| {
-            team().is_some_and(|team| {
-                team.hero_life_list
-                    .iter()
-                    .filter(|life| life.life.unwrap_or_default() <= 0)
-                    .count()
-                    >= need.max(0) as usize
-            })
-        }),
-        // HadNotUniqueCollectionNum
-        18 => parse().is_some_and(|need| {
-            bag().is_some_and(|bag| {
-                bag.items
-                    .iter()
-                    .flat_map(|item| {
-                        std::iter::once(item.item_id).chain(item.holes.iter().copied())
-                    })
-                    .filter(|item_id| *item_id != 0 && !collection_shapes::is_unique(*item_id))
-                    .count()
-                    >= need.max(0) as usize
-            })
-        }),
-        // DLC and persistent-history gates are intentionally unavailable in the
-        // base-game run until their corresponding systems are implemented.
-        _ => false,
-    }
+    ending_rules::is_unlocked(run, choice.unlock_type, &choice.unlock_param)
 }
 
 fn run_position(run: &RougeRun) -> RougeRunPosition {
@@ -2739,11 +2750,21 @@ pub fn automatic_fight_resource_update(
     gained_coin: i32,
     gained_power: i32,
 ) -> Result<String, AppError> {
+    automatic_fight_outcome_update(run, gained_coin, gained_power, 0)
+}
+
+pub fn automatic_fight_outcome_update(
+    run: &RougeRun,
+    gained_coin: i32,
+    gained_power: i32,
+    collections: i32,
+) -> Result<String, AppError> {
     updated_entrust(
         run,
         EntrustChange {
             gained_coin,
             gained_power,
+            collections,
             ..Default::default()
         },
     )
@@ -2753,13 +2774,15 @@ fn middle_state(run: &RougeRun) -> MiddleState {
     let previous = serde_json::from_str::<MiddleState>(&run.middle_state).ok();
     if let Some(state) = &previous {
         if state.middle_layer_id == run.middle_layer_id {
-            return MiddleState {
+            let mut state = MiddleState {
                 pieces: state.pieces.clone(),
                 entrust_id: state.entrust_id,
                 entrust_progress: state.entrust_progress,
                 completed_entrusts: state.completed_entrusts.clone(),
                 middle_layer_id: state.middle_layer_id,
             };
+            ensure_ending_pieces(run, &mut state);
+            return state;
         }
     }
     let tables = config::configs::get();
@@ -2770,10 +2793,19 @@ fn middle_state(run: &RougeRun) -> MiddleState {
         .iter()
         .filter(|piece| piece.version.is_empty() && piece.id / 10000 == run.middle_layer_id)
     {
+        if run.middle_layer_id == 141
+            && piece.id == 1410301
+            && !ending_rules::is_unlocked(run, 12, "")
+        {
+            continue;
+        }
         // Unlocked alternate endings must be selected by their story branch;
         // randomly substituting one can leave the final room with no usable
         // boss option. The recorded base route always has ending piece 1510501.
-        if run.middle_layer_id == 151 && piece.entrust_type == 5 && piece.id != 1510501 {
+        if piece.entrust_type == 5
+            && (151..=154).contains(&run.middle_layer_id)
+            && piece.id != 1510501 + run.middle_layer_id - 151
+        {
             continue;
         }
         if piece.entrust_type == 1 {
@@ -2814,7 +2846,7 @@ fn middle_state(run: &RougeRun) -> MiddleState {
             finish: Some(false),
         })
         .collect();
-    MiddleState {
+    let mut state = MiddleState {
         pieces,
         entrust_id: previous.as_ref().map(|state| state.entrust_id).unwrap_or(0),
         entrust_progress: previous
@@ -2826,6 +2858,49 @@ fn middle_state(run: &RougeRun) -> MiddleState {
             .map(|state| state.completed_entrusts.clone())
             .unwrap_or_default(),
         middle_layer_id: run.middle_layer_id,
+    };
+    ensure_ending_pieces(run, &mut state);
+    state
+}
+
+fn ensure_ending_pieces(run: &RougeRun, state: &mut MiddleState) {
+    let mut required = Vec::new();
+    if (151..=154).contains(&run.middle_layer_id) {
+        let boss = 1510501 + run.middle_layer_id - 151;
+        state
+            .pieces
+            .retain(|piece| !matches!(piece.id, Some(1510501..=1510504)) || piece.id == Some(boss));
+        required.push(boss);
+    } else if run.middle_layer_id == 141 {
+        required.push(1410201);
+        if ending_rules::is_unlocked(run, 12, "")
+            && (ending_rules::is_unlocked(run, 1, "8320907")
+                || ending_rules::is_unlocked(run, 1, "8180501"))
+        {
+            required.push(1410301);
+        }
+    }
+    for id in required {
+        if state.pieces.iter().any(|piece| piece.id == Some(id)) {
+            continue;
+        }
+        if let Some(row) = config::configs::get().rouge_piece.get(id) {
+            let index = state
+                .pieces
+                .iter()
+                .filter_map(|piece| piece.index)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            state.pieces.push(RougePieceInfo {
+                index: Some(index),
+                id: Some(id),
+                talk_id: Some(row.talk_id),
+                select_id: Some(0),
+                finish: Some(false),
+                ..Default::default()
+            });
+        }
     }
 }
 
@@ -3323,7 +3398,10 @@ async fn start_run(
     let mut details = flow::details(&run);
     details.outside_genius = Some(genius_ids);
     details.safe_zone_recovery = style.map(|style| style.power);
+    details.passed_endings =
+        Some(database::db::game::rouge_history::passed_endings(db, user_id, start.season).await?);
     run.details = serde_json::to_string(&details)?;
+    artifact_lifecycle::initialize(&mut run)?;
     flow::save(db, &before, &run).await?;
     Ok(run)
 }

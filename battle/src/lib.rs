@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod dungeon;
 pub mod hero;
+pub mod rouge;
 pub mod tooling;
 pub mod tower;
 

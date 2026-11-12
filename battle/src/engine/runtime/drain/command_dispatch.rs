@@ -1,5 +1,25 @@
 use super::{command_prepare::prepare_command, *};
 
+// Keep the large QueuedOp construction out of drain_command's recursive stack
+// frame. Non-Rouge battles must not pay its temporary enum storage cost.
+#[inline(never)]
+fn queued_rouge_followups(ops: Vec<RuleOp>, parent_path: &[usize]) -> Vec<QueuedOp> {
+    ops.into_iter()
+        .map(|op| QueuedOp {
+            op,
+            trigger: SkillOpTrigger::Active,
+            skill_execution: None,
+            frame_path: None,
+            parent_path: Some(parent_path.to_vec()),
+            frame_group: None,
+            independent_parent_group: None,
+            frame_owner: Some(FrameOwner::EventRule),
+            subscriber: None,
+            caster_frame: None,
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_command(
     managers: &mut BattleManagers,
@@ -238,6 +258,11 @@ pub(super) fn drain_command(
     // Managers publish semantic events through the bus. Reactions are
     // derived from these committed events, never fired by packet code.
     let mut events = std::iter::from_fn(|| bus.pop()).collect::<Vec<_>>();
+    let rouge_followups = if managers.rouge.context().is_some() {
+        crate::rouge::observe_events(managers, pool, context.current_round, &events)
+    } else {
+        Vec::new()
+    };
     let mut event_groups = match &outcome {
         RuleOutcome::HpBatch(batch) => grouped_hp_events(
             &events,
@@ -675,6 +700,9 @@ pub(super) fn drain_command(
         )?;
     }
     let mut after_publish = reactions.after_publish;
+    if !rouge_followups.is_empty() {
+        after_publish.extend(queued_rouge_followups(rouge_followups, &frame_path));
+    }
     let after_settlement = reactions.after_settlement;
     if releases_hit_passive_skills {
         let mut released_hit_passives = state

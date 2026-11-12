@@ -54,6 +54,7 @@ use self::{
 /// mutation and returns semantic changes for events and packet projection.
 #[derive(Debug, Clone, Default)]
 pub struct BattleManagers {
+    pub(crate) rouge: crate::rouge::RougeRuntime,
     catalog_data: Option<crate::catalog::BattleCatalog>,
     fight_version: i32,
     terminal_outcome: Option<crate::engine::round::outcome::BattleOutcome>,

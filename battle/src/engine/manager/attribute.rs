@@ -210,6 +210,10 @@ impl AttributeManager {
         self.values.get(&(uid, id)).copied().unwrap_or_default()
     }
 
+    pub(crate) fn add(&mut self, uid: i64, id: AttrId, value: i32) {
+        self.set(uid, id, self.get(uid, id).saturating_add(value));
+    }
+
     pub fn base(&self, uid: i64, id: AttrId) -> i32 {
         self.base_values
             .get(&(uid, id))

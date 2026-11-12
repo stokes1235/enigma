@@ -90,6 +90,18 @@ fn values(run: &RougeRun, bag: Option<&RunBag>, item: &BagItem) -> BTreeMap<i32,
             .clamp(0, 100);
         result.insert(1002, i64::from(progress));
     }
+    if item.item_id == 8310206 {
+        // The persistent counter stores swallowed objects; count2 in the
+        // description is the resulting percentage-point attack enhancement.
+        let eaten = super::flow::details(run)
+            .artifact_state
+            .counters
+            .get(&item.uid)
+            .copied()
+            .unwrap_or_default()
+            .max(0);
+        *result.entry(1002).or_default() += i64::from(eaten).saturating_mul(3);
+    }
     if !active(item) {
         return result;
     }
@@ -249,6 +261,25 @@ mod tests {
         let layout = &payload.layouts[0];
         assert_eq!(attrs(layout.item.as_ref().unwrap()).get(&1002), Some(&20));
         assert_eq!(layout.attr, layout.item.as_ref().unwrap().attr);
+    }
+
+    #[test]
+    fn cane_displays_persistent_consumption_growth_after_storage() {
+        let (mut run, mut bag) = fixture(vec![item(7, 8310206)]);
+        let mut detail = super::super::flow::details(&run);
+        detail.artifact_state.counters.insert(7, 2);
+        run.details = serde_json::to_string(&detail).unwrap();
+        assert_eq!(
+            attrs(bag_payload(&run, &bag).layouts[0].item.as_ref().unwrap()).get(&1002),
+            Some(&6)
+        );
+        bag.items[0].row = -1;
+        bag.items[0].col = -1;
+        run.bag = serde_json::to_string(&bag).unwrap();
+        assert_eq!(
+            attrs(&item_payload(&run, &bag.items[0])).get(&1002),
+            Some(&6)
+        );
     }
 
     #[test]

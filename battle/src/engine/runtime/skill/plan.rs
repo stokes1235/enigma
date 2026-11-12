@@ -52,6 +52,45 @@ pub(in crate::engine::runtime) struct SkillExecution {
 }
 
 impl SkillExecution {
+    pub(in crate::engine::runtime) fn prepare_rouge(
+        &mut self,
+        managers: &BattleManagers,
+        pool: &TargetPool,
+        catalog: &SkillEffectCatalog,
+        invocation: &SkillInvocation,
+    ) {
+        if !pool.source_is_attacker(invocation.plan.source_uid) {
+            return;
+        }
+        let context = crate::rouge::AttackContext {
+            rank: managers.catalog().skill_rank(invocation.plan.skill_id),
+            ultimate: catalog.is_big_skill(invocation.plan.skill_id),
+            support: crate::rouge::is_support_card(
+                managers,
+                invocation.plan.source_uid,
+                invocation.plan.skill_id,
+                invocation.card_index,
+            ),
+            extra_action: crate::engine::skill::action::performs_extra_action(
+                invocation.card_index,
+                invocation.mode,
+                invocation
+                    .extra_skill_kind
+                    .or_else(|| {
+                        managers
+                            .entity
+                            .skill_kind(invocation.plan.source_uid, invocation.plan.skill_id)
+                    })
+                    .map_or_else(
+                        || catalog.extra_kind(invocation.plan.skill_id),
+                        |kind| kind.id(),
+                    ),
+            ),
+        };
+        self.modifiers
+            .attack_attributes
+            .extend(crate::rouge::attack_attributes(managers, &context));
+    }
     pub(in crate::engine::runtime) fn inherit_assassination_marks(&mut self, parent: &Self) {
         self.assassination_marks_at_action_start
             .clone_from(&parent.assassination_marks_at_action_start);

@@ -7,6 +7,7 @@ pub struct BuiltFight {
     pub fight: Fight,
     pub ex_attributes: Vec<(i64, sonettobuf::HeroExAttribute)>,
     pub sp_attributes: Vec<(i64, sonettobuf::HeroSpAttribute)>,
+    pub rouge: Option<crate::rouge::RougeContext>,
     pub(crate) battle_rule_skills: Vec<crate::engine::fight::rules::OwnedBattleSkill>,
 }
 
@@ -67,6 +68,7 @@ pub fn build_fight(
         },
         ex_attributes: attacker.ex_attributes,
         sp_attributes: attacker.sp_attributes,
+        rouge: None,
         battle_rule_skills: Vec::new(),
     })
 }

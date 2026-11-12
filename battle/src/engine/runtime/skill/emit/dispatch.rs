@@ -301,6 +301,9 @@ pub(in crate::engine::runtime) fn emit_ops(
         execution.configured_targets = Some(configured_targets);
     }
     if !resuming_phase && active_phase == Some(SkillPhase::Immediate) {
+        if managers.rouge.context().is_some() {
+            execution.prepare_rouge(managers, pool, catalog, &invocation);
+        }
         if let Some(modifier) = invocation.rate_modifier {
             execution.modifiers.rates.push(modifier);
         }

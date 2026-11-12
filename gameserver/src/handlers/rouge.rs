@@ -1047,6 +1047,84 @@ pub async fn on_rouge_end(ctx: &mut ConnectionContext, req: ClientPacket) -> Res
     .await
 }
 
+pub async fn on_rouge_repair_shop_buy(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeRepairShopBuyRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let piece = ctx
+        .player()?
+        .rouge
+        .repair_buy(
+            ctx.state.db,
+            season,
+            msg.collection_id.ok_or(AppError::InvalidRequest)?,
+        )
+        .await?;
+    notify_full_run(ctx, season).await?;
+    ctx.send_reply(
+        CmdId::RougeRepairShopBuyCmd,
+        sonettobuf::RougeRepairShopBuyReply {
+            piece_info: Some(piece),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_repair_shop_random(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeRepairShopRandomRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let piece = ctx
+        .player()?
+        .rouge
+        .repair_random(ctx.state.db, season)
+        .await?;
+    notify_full_run(ctx, season).await?;
+    ctx.send_reply(
+        CmdId::RougeRepairShopRandomCmd,
+        sonettobuf::RougeRepairShopRandomReply {
+            piece_info: Some(piece),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
+pub async fn on_rouge_displace(
+    ctx: &mut ConnectionContext,
+    req: ClientPacket,
+) -> Result<(), AppError> {
+    let msg = sonettobuf::RougeDisplaceRequest::decode(&req.data[..])?;
+    let season = msg.season.ok_or(AppError::InvalidRequest)?;
+    let (piece, id) = ctx
+        .player()?
+        .rouge
+        .displace(
+            ctx.state.db,
+            season,
+            msg.collection_id.ok_or(AppError::InvalidRequest)?,
+        )
+        .await?;
+    notify_full_run(ctx, season).await?;
+    ctx.send_reply(
+        CmdId::RougeDisplaceCmd,
+        sonettobuf::RougeDisplaceReply {
+            piece_info: Some(piece),
+            collection_id: Some(id),
+        },
+        0,
+        req.up_tag,
+    )
+    .await
+}
+
 pub async fn on_rouge_shop_refresh(
     ctx: &mut ConnectionContext,
     req: ClientPacket,
@@ -1103,7 +1181,7 @@ pub async fn on_rouge_buy_goods(
         )
         .await?;
     }
-    notify_run_resources(ctx, season).await?;
+    notify_full_run(ctx, season).await?;
     ctx.send_reply(
         CmdId::RougeBuyGoodsCmd,
         RougeBuyGoodsReply { map: Some(map) },

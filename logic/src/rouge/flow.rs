@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub struct Details {
     /// Snapshot permanent growth at run creation. None marks a pre-upgrade run.
     pub outside_genius: Option<Vec<i32>>,
+    pub passed_endings: Option<Vec<i32>>,
     pub battle_reward: Option<BattleReward>,
     pub artifact_state: super::artifact_rules::MapState,
     pub artifact_power_limit_bonus: i32,
@@ -17,6 +18,8 @@ pub struct Details {
     pub end_episode: i32,
     pub end_id: i32,
     pub consume_power: i32,
+    pub repair_shop_num: i32,
+    pub displace_num: i32,
     pub compositions: BTreeMap<i32, i32>,
     pub triggered_talents: Vec<usize>,
     pub effects: Vec<i32>,
@@ -30,6 +33,8 @@ pub struct BattleReward {
     pub exp: i32,
     pub extra_drops: i32,
     pub extra_select: i32,
+    #[serde(default)]
+    pub disk_choices: i32,
 }
 
 pub fn details(run: &RougeRun) -> Details {
@@ -59,13 +64,17 @@ pub fn reward(run: &RougeRun, drop_id: i32) -> BattleReward {
     }
     let growth = bonuses(run);
     let extra = growth.extra_drops(drop_id);
-    let item_bonus = serde_json::from_str::<bag::RunBag>(&run.bag)
+    let item_effects = serde_json::from_str::<bag::RunBag>(&run.bag)
         .ok()
         .map(|bag| {
-            super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin)
-                .coin_drop_bonus_per_mille
+            super::artifact_rules::evaluate_battle_with_state(
+                config::configs::get(),
+                &bag,
+                run.coin,
+                &details(run).artifact_state,
+            )
         })
-        .unwrap_or(0);
+        .unwrap_or_default();
     BattleReward {
         node_id: run.node_id,
         drop_id,
@@ -74,7 +83,9 @@ pub fn reward(run: &RougeRun, drop_id: i32) -> BattleReward {
             .get(drop_id)
             .map(|row| {
                 ((drop_coin(row) as i64
-                    * (1000 + 10 * (growth.coin_percent + growth.battle_coin_percent) + item_bonus)
+                    * (1000
+                        + 10 * (growth.coin_percent + growth.battle_coin_percent)
+                        + item_effects.coin_drop_bonus_per_mille)
                         .max(0) as i64
                     / 1000)
                     .min(i32::MAX as i64)) as i32
@@ -83,6 +94,11 @@ pub fn reward(run: &RougeRun, drop_id: i32) -> BattleReward {
         exp: super::genius_bonuses::scale(reward_exp(drop_id), growth.essence_percent),
         extra_drops: extra.0,
         extra_select: extra.1,
+        disk_choices: if (1001..=1015).contains(&drop_id) {
+            item_effects.extra_disk_choices
+        } else {
+            0
+        },
     }
 }
 
@@ -278,6 +294,15 @@ pub async fn save<'e>(
     Ok(())
 }
 
+pub async fn save_action<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    expected: &RougeRun,
+    run: &mut RougeRun,
+) -> Result<(), AppError> {
+    super::artifact_lifecycle::prepare(expected, run)?;
+    save(db, expected, run).await
+}
+
 /// Completing a leaf enters its safe zone even when it was a treasure/rest
 /// event. The final safe zone is still followed by an explicitly chosen fight.
 pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
@@ -364,13 +389,14 @@ pub fn finish_node(run: &mut RougeRun) -> Result<(), AppError> {
 pub async fn resume(db: &SqlitePool, expected: RougeRun) -> Result<RougeRun, AppError> {
     let mut run = expected.clone();
     sync_artifact_limit(&mut run)?;
+    super::artifact_lifecycle::prepare(&expected, &mut run)?;
     finish_node(&mut run)?;
     if run.map_type != expected.map_type
         || run.details != expected.details
         || run.power_limit != expected.power_limit
         || run.power != expected.power
     {
-        save(db, &expected, &run).await?;
+        save_action(db, &expected, &mut run).await?;
     }
     Ok(run)
 }
@@ -379,7 +405,12 @@ pub fn sync_artifact_limit(run: &mut RougeRun) -> Result<(), AppError> {
     let Ok(bag) = serde_json::from_str::<bag::RunBag>(&run.bag) else {
         return Ok(());
     };
-    let effects = super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin);
+    let effects = super::artifact_rules::evaluate_battle_with_state(
+        config::configs::get(),
+        &bag,
+        run.coin,
+        &details(run).artifact_state,
+    );
     let mut detail = details(run);
     let delta = effects
         .power_limit_bonus
@@ -397,21 +428,41 @@ pub fn apply_map_effects(
     run: &mut RougeRun,
     trigger: super::artifact_rules::MapTrigger,
 ) -> Result<(), AppError> {
+    let Ok(bag) = serde_json::from_str::<bag::RunBag>(&run.bag) else {
+        return Ok(());
+    };
+    apply_map_effects_from(run, trigger, &bag)
+}
+
+pub(super) fn apply_map_effects_from(
+    run: &mut RougeRun,
+    trigger: super::artifact_rules::MapTrigger,
+    source: &bag::RunBag,
+) -> Result<(), AppError> {
     sync_artifact_limit(run)?;
     let Ok(mut bag) = serde_json::from_str::<bag::RunBag>(&run.bag) else {
         return Ok(());
     };
     let mut detail = details(run);
-    let change = super::artifact_rules::evaluate_map(
+    let change = super::artifact_rules::evaluate_map_with_context(
         config::configs::get(),
-        &bag,
+        source,
         trigger,
         &detail.artifact_state,
+        &super::artifact_rules::MapContext {
+            coin: run.coin,
+            seed: run.seed as u64
+                ^ (run.layer_id as u64).rotate_left(32)
+                ^ (run.node_id as u64).rotate_left(17)
+                ^ (run.retry_num as u64).rotate_left(43),
+        },
     );
-    run.coin = run.coin.saturating_add(super::genius_bonuses::scale(
-        change.coin,
-        bonuses(run).coin_percent,
-    ));
+    let coin = if change.coin > 0 {
+        super::genius_bonuses::scale(change.coin, bonuses(run).coin_percent)
+    } else {
+        change.coin
+    };
+    run.coin = run.coin.saturating_add(coin).max(0);
     run.power = run
         .power
         .saturating_add(change.power)
@@ -422,8 +473,14 @@ pub fn apply_map_effects(
     if !change.consume_uids.is_empty() {
         bag.items
             .retain(|item| !change.consume_uids.contains(&item.uid));
-        run.bag = serde_json::to_string(&bag)?;
     }
+    for replacement in change.replace_items {
+        super::artifact_lifecycle::replace(&mut bag, replacement.uid, replacement.item_id)?;
+    }
+    for id in change.grant_items {
+        bag.add(id)?;
+    }
+    run.bag = serde_json::to_string(&bag)?;
     detail.artifact_state = change.state;
     run.details = serde_json::to_string(&detail)?;
     sync_artifact_limit(run)?;
@@ -448,12 +505,59 @@ pub fn shop_price(run: &RougeRun, original: i32) -> i32 {
     let reduction = serde_json::from_str::<bag::RunBag>(&run.bag)
         .ok()
         .map(|bag| {
-            super::artifact_rules::evaluate_battle(config::configs::get(), &bag, run.coin)
-                .shop_price_reduction_per_mille
+            super::artifact_rules::evaluate_battle_with_state(
+                config::configs::get(),
+                &bag,
+                run.coin,
+                &details(run).artifact_state,
+            )
+        })
+        .map(|effects| {
+            effects.shop_price_reduction_per_mille
+                + if effects.shop_price_reduction_per_mille > 0 {
+                    effects.sale_discount_bonus_per_mille
+                } else {
+                    0
+                }
         })
         .unwrap_or(0)
         .clamp(0, 1000);
     (original.max(0) as i64 * (1000 - reduction) as i64 / 1000).min(i32::MAX as i64) as i32
+}
+
+/// Only advertise menu effects whose corresponding server actions exist.
+pub fn effect_info(run: &RougeRun) -> Vec<sonettobuf::RougeEffectInfo> {
+    let tables = config::configs::get();
+    let detail = details(run);
+    let mut ids = detail.effects;
+    for id in detail.outside_genius.as_deref().unwrap_or_default() {
+        if let Some(row) = tables.rouge_genius_branch.get(*id) {
+            ids.extend(
+                row.effects
+                    .split('|')
+                    .filter_map(|id| id.parse::<i32>().ok()),
+            );
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let mut grouped: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+    for id in ids {
+        if let Some(effect) = tables
+            .rouge_effect
+            .get(id)
+            .filter(|effect| matches!(effect.r#type, 20 | 21 | 28))
+        {
+            grouped.entry(effect.r#type).or_default().push(id);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(kind, ids)| sonettobuf::RougeEffectInfo {
+            r#type: Some(kind),
+            effect_id: ids,
+        })
+        .collect()
 }
 
 pub fn queue_level_recruit(run: &mut RougeRun, old_exp: i32) {
@@ -611,8 +715,9 @@ impl RougeManager {
                 ..Default::default()
             },
         )?;
+        super::artifact_lifecycle::prepare(&expected, &mut run)?;
         finish_node(&mut run)?;
-        save(db, &expected, &run).await?;
+        save_action(db, &expected, &mut run).await?;
         Ok(map_info(&run))
     }
     pub async fn compose(
@@ -693,7 +798,7 @@ impl RougeManager {
         let mut detail = details(&run);
         *detail.compositions.entry(recipe.product).or_default() += 1;
         run.details = serde_json::to_string(&detail)?;
-        save(db, &expected, &run).await?;
+        save_action(db, &expected, &mut run).await?;
         Ok(bag::RunBag::to_client_item(&product))
     }
 
@@ -750,7 +855,7 @@ impl RougeManager {
             }
         }
         run.details = serde_json::to_string(&detail)?;
-        save(db, &expected, &run).await?;
+        save_action(db, &expected, &mut run).await?;
         Ok(talent_tree(&start, &run))
     }
 }
@@ -1019,6 +1124,21 @@ mod tests {
                         .await
                         .is_err()
                 );
+                if mid == 141 {
+                    let priest = middle
+                        .piece_info
+                        .iter()
+                        .find(|piece| piece.id == Some(1410201))
+                        .unwrap();
+                    manager
+                        .piece_move(&db, 1, layer, mid, priest.index.unwrap())
+                        .await
+                        .unwrap();
+                    manager
+                        .piece_talk_select(&db, 1, layer, mid, priest.index.unwrap(), 1410201)
+                        .await
+                        .unwrap();
+                }
                 manager.piece_move(&db, 1, layer, mid, -1).await.unwrap();
                 manager
                     .leave_middle_layer(&db, 1, layer, mid, next)

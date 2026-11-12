@@ -23,17 +23,28 @@ impl Battle {
             fight,
             ex_attributes,
             sp_attributes,
+            rouge,
             battle_rule_skills,
         } = built;
         let mut runtime =
             BattleRuntime::new_with_attributes(catalog, fight, ex_attributes, sp_attributes);
         runtime.extend_battle_rule_skills(battle_rule_skills);
+        if let Some(context) = rouge {
+            runtime.configure_rouge(context);
+        }
         runtime.start_round_with_determinism(RoundDeterminism::with_seed(seed))?;
         Ok(Self { runtime })
     }
 
     pub fn outcome(&self) -> BattleOutcome {
         self.runtime.outcome()
+    }
+
+    pub fn rouge_context(&self) -> Option<&crate::rouge::RougeContext> {
+        self.runtime.rouge_context()
+    }
+    pub fn rouge_counters(&self) -> crate::rouge::Counters {
+        self.runtime.rouge_counters()
     }
 
     pub fn current_round(&self) -> i32 {
@@ -154,6 +165,7 @@ mod tests {
                 fight,
                 ex_attributes: Vec::new(),
                 sp_attributes: Vec::new(),
+                rouge: None,
                 battle_rule_skills: vec![rule_skill],
             },
             seed,

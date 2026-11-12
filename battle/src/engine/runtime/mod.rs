@@ -56,6 +56,24 @@ pub struct BattleRuntime {
 }
 
 impl BattleRuntime {
+    pub fn configure_rouge(&mut self, context: crate::rouge::RougeContext) {
+        assert!(
+            self.round.is_none(),
+            "Rouge context must precede battle opening"
+        );
+        assert!(
+            self.managers.rouge.context().is_none(),
+            "Rouge context is already configured"
+        );
+        crate::rouge::configure(&mut self.managers, context);
+    }
+
+    pub fn rouge_context(&self) -> Option<&crate::rouge::RougeContext> {
+        self.managers.rouge.context()
+    }
+    pub fn rouge_counters(&self) -> crate::rouge::Counters {
+        self.managers.rouge.counters()
+    }
     /// Plans client auto-battle operations without mutating authoritative state.
     pub fn plan_auto_round(
         &self,

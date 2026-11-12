@@ -510,6 +510,21 @@ pub async fn settle_run(
         tx.rollback().await?;
         return Ok(false);
     }
+    if cleared
+        && let Some(ending) = serde_json::from_str::<serde_json::Value>(rouge_info)
+            .ok()
+            .and_then(|info| info.get("endId").and_then(|id| id.as_i64()))
+            .filter(|id| (101..=104).contains(id))
+    {
+        super::rouge_history::record_ending_in_transaction(
+            &mut tx,
+            user_id,
+            season,
+            ending as i32,
+            now,
+        )
+        .await?;
+    }
     sqlx::query("INSERT INTO user_rouge_settlement (user_id, season, rouge_info, result_info) VALUES (?, ?, ?, ?) ON CONFLICT (user_id, season) DO UPDATE SET rouge_info = excluded.rouge_info, result_info = excluded.result_info")
         .bind(user_id).bind(season).bind(rouge_info).bind(result_info).execute(&mut *tx).await?;
     tx.commit().await?;

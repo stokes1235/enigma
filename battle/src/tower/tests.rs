@@ -34,6 +34,7 @@ fn boss_five_setup_is_derived_from_the_captured_config_chain() {
         },
         ex_attributes: vec![],
         sp_attributes: vec![],
+        rouge: None,
         battle_rule_skills: vec![],
     };
 
@@ -84,6 +85,7 @@ fn tower_extra_rules_keep_virtual_and_entity_ownership_separate() {
         },
         ex_attributes: vec![],
         sp_attributes: vec![],
+        rouge: None,
         battle_rule_skills: vec![],
     };
 

@@ -50,6 +50,7 @@ pub mod room_orders;
 pub mod room_plan;
 pub mod rouge;
 pub mod rouge_extra;
+pub mod rouge_history;
 pub mod settings;
 pub mod sign_in;
 pub mod simple_property;

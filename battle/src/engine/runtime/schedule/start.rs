@@ -658,6 +658,13 @@ pub fn run_start(
 ) -> Result<(DrainResult, Vec<sonettobuf::CardInfo>), DrainError> {
     let mut opening_ultimate_cards: Option<Vec<sonettobuf::CardInfo>> = None;
     let mut result = DrainResult::default();
+    let rouge_opening = crate::rouge::opening(managers, pool);
+    if !rouge_opening.is_empty() {
+        append(
+            &mut result,
+            drain::run_command_group(managers, pool, catalog, determinism, context, rouge_opening)?,
+        );
+    }
     let conduit_initializations = managers
         .conduit
         .initialization_commands()

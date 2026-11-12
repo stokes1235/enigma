@@ -126,6 +126,13 @@ pub fn run_attacker_round_end(
         &mut result,
         run_card_enchant_round_end(managers, pool, catalog, determinism, context)?,
     );
+    let rouge_end = crate::rouge::round_end(managers, pool, context.current_round);
+    if !rouge_end.is_empty() {
+        append(
+            &mut result,
+            drain::run_command_group(managers, pool, catalog, determinism, context, rouge_end)?,
+        );
+    }
     Ok(result)
 }
 
