@@ -4,6 +4,8 @@ use crate::engine::round::state::continuation_round_shell;
 
 use super::{BattleRuntime, change, drain, executor, project_result, record};
 
+mod rouge;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ClothSkillType {
@@ -58,6 +60,7 @@ impl BattleRuntime {
         let fight_version = self.fight.version.unwrap_or_default();
         let absorb_hurt_map_layout = self.absorb_hurt_map_layout;
         let steps = match skill_type {
+            ClothSkillType::Rouge => self.use_rouge_catalyst(&request)?,
             ClothSkillType::ClothSkill => {
                 let source_uid = request.from_id.unwrap_or_default();
                 let skill_id = request.skill_id?;

@@ -42,6 +42,17 @@ fn queued_invalid_ultimate_removal(
     let BattleEvent::ExPointChanged(change) = event else {
         return None;
     };
+    // Rouge's linked own/Aid ultimates are reconciled together by its event
+    // observer. Two independent removals would shift the same hand twice.
+    if managers.rouge.context().is_some_and(|context| {
+        context.catalyst.is_some()
+            || context
+                .support_ultimates
+                .iter()
+                .any(|mapping| mapping.owner_uid == change.target_uid)
+    }) {
+        return None;
+    }
     let entity = pool
         .attacker_main
         .iter()

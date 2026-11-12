@@ -12,11 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "artifact_attack.rs"]
 mod attack;
+#[path = "artifact_entry.rs"]
+mod entry;
 #[path = "artifact_metadata.rs"]
 mod geometry;
 pub use attack::{
     AttackContext, AttackPredicate, ConditionalModifier, attack_modifiers, evaluate_attack,
 };
+pub use entry::{LayoutCounts, entry_context, layout_counts};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsupportedEffect {
@@ -365,17 +368,16 @@ pub fn evaluate_battle_with_state(
                 add_rate(&mut result, 213, 100);
             }
             // Conditional rates are exposed separately, for one skill only.
-            8110312 | 8210313 | 8230305 | 8330306 | 8310706 => {}
+            8110312 | 8210313 | 8230305 | 8330306 | 8310706 | 8210712 => {}
             8310108 => result.unsupported.push(unsupported(
                 item,
                 "Aid-cast damage supported; kill-triggered power still needs combat support",
             )),
             8230019 => {
                 result.sale_discount_bonus_per_mille += 200;
-                result.unsupported.push(unsupported(
-                    item,
-                    "two random permanent entry buffs need combat support",
-                ));
+                // The entry runtime grants two current permanent-set buffs,
+                // preferring missing effects. Stable seeded selection is a
+                // documented local interpretation of the random draw.
             }
             8310022 => add_rate(
                 &mut result,
@@ -490,32 +492,30 @@ pub fn evaluate_battle_with_state(
             }
             8330607 => {
                 result.shop_price_reduction_per_mille += 150;
-                result.unsupported.push(unsupported(
-                    item,
-                    "five random permanent buffs on entry need combat support",
-                ));
+                // Five current permanent-set buffs use the same entry hook.
             }
             8230024 | 8130605 | 8140101 | 8240102 | 8140601 | 8240602 | 8230606 | 8330708
-            | 8330817 => {}
-            8320506 => result.unsupported.push(unsupported(
-                item,
-                "battle-entry power supported; Resonance buffs need combat support",
-            )),
-            8310309 => result.unsupported.push(unsupported(
-                item,
-                "safe-zone forging supported; rank-2/3 Might stacks need combat support",
-            )),
+            | 8330817 | 8320506 | 8310309 | 8220613 | 8110213 | 8110307 | 8210308 | 8120034
+            | 8120104 | 8130041 | 8130103 | 8130203 | 8130217 | 8130303 | 8230304 | 8130803
+            | 8130804 | 8230027 | 8230028 | 8330026 | 8120406 | 8130403 | 8130404 | 8120821
+            | 8210314 | 8310315 => {}
             8330615 => result.unsupported.push(unsupported(
                 item,
                 "acquisition coins supported; storm region substitution needs combat support",
             )),
-            8220613 => result.unsupported.push(unsupported(
+            8210711 => result.unsupported.push(unsupported(
                 item,
-                "safe-zone coins supported; entry spending/Blessing needs combat support",
+                "Bullet damage supported; the extra-action chance still needs combat support",
+            )),
+            8330710 => result.unsupported.push(unsupported(
+                item,
+                "round-start Schemed supported; storm region replacement is pending",
             )),
             // The combat runtime grants the verified anticipation states and
             // generates own/support cards at their next real trigger.
             8210045 => {}
+            _ if battle::rouge::artefact_entry::has_entry_effect(item.item_id)
+                || battle::rouge::artefact_entry::medication_skill_id(item.item_id).is_some() => {}
             _ => result.unsupported.push(unsupported(
                 item,
                 "scripted artefact effect not yet implemented",
@@ -1042,12 +1042,7 @@ mod tests {
         let result = evaluate_battle(tables(), &layout, 0);
         assert_eq!(result.coin_drop_bonus_per_mille, 200);
         assert_eq!(result.shop_price_reduction_per_mille, 250);
-        assert!(
-            result
-                .unsupported
-                .iter()
-                .any(|effect| effect.item_id == 8330607)
-        );
+        assert!(result.unsupported.is_empty());
     }
 
     #[test]
@@ -1125,7 +1120,7 @@ mod tests {
     fn dlc_and_unknown_effects_are_explicitly_unsupported() {
         let result = evaluate_battle(
             tables(),
-            &bag(vec![item(1, 8320062, 0, 0), item(2, 8120034, 3, 0)]),
+            &bag(vec![item(1, 8320062, 0, 0), item(2, 8120035, 3, 0)]),
             0,
         );
         assert!(result.attribute_rates.is_empty());

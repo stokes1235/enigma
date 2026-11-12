@@ -498,6 +498,13 @@ pub fn run_round_start_after_ai_split(
             &owner_uids,
         )?,
     );
+    let rouge_round = crate::rouge::round_start(managers, pool, context.current_round, determinism);
+    if !rouge_round.is_empty() {
+        append(
+            &mut next_round_begin_steps,
+            drain::run_command_group(managers, pool, catalog, determinism, context, rouge_round)?,
+        );
+    }
     append(
         &mut next_round_begin_steps,
         run_card_energy_allocation(managers, pool, catalog, determinism, context, 1)?,
@@ -1181,6 +1188,23 @@ pub fn run_start(
             Some(&owner_uids),
         )?,
     );
+    // Medication cards must be added after CardSetup/refill; the setup would
+    // otherwise replace the entire hand. Their entry gate prevents a replay
+    // or a repeated setup from generating a second copy.
+    let rouge_cards = crate::rouge::opening_cards(managers);
+    if !rouge_cards.is_empty() {
+        append(
+            &mut result,
+            drain::run_command_group(managers, pool, catalog, determinism, context, rouge_cards)?,
+        );
+    }
+    let rouge_round = crate::rouge::round_start(managers, pool, context.current_round, determinism);
+    if !rouge_round.is_empty() {
+        append(
+            &mut result,
+            drain::run_command_group(managers, pool, catalog, determinism, context, rouge_round)?,
+        );
+    }
     append(
         &mut result,
         run_card_energy_allocation(managers, pool, catalog, determinism, context, 1)?,

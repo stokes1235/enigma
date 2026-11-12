@@ -23,8 +23,15 @@ use crate::engine::{
     },
 };
 
+pub mod catalyst;
 mod growth;
 mod statistics;
+pub use catalyst::{Catalyst, Resources, SupportUltimate};
+pub mod artefact_entry;
+pub use artefact_entry::EntryContext;
+mod artefact_turns;
+pub mod difficulty;
+pub use difficulty::Difficulty;
 pub(crate) use growth::end_round as end_incantation_round;
 pub(crate) use statistics::record_hp;
 
@@ -48,6 +55,10 @@ pub struct RougeContext {
     pub growth_sources: Vec<GrowthSource>,
     /// None preserves old contexts and ordinary battles without this unlock.
     pub incantation_rules: Option<IncantationRules>,
+    pub catalyst: Option<Catalyst>,
+    pub support_ultimates: Vec<SupportUltimate>,
+    pub entry: Option<EntryContext>,
+    pub difficulty: Option<Difficulty>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,17 +126,23 @@ pub struct SupportSkill {
 }
 
 pub(crate) fn hand_limit_bonus(managers: &BattleManagers) -> i32 {
-    managers
-        .rouge
-        .context()
-        .into_iter()
-        .flat_map(|context| &context.artefacts)
+    let Some(context) = managers.rouge.context() else {
+        return 0;
+    };
+    let style = match context.catalyst.as_ref().map(|catalyst| catalyst.style_id) {
+        Some(4) => 2_i32,
+        Some(5 | 6) => 3,
+        _ => 0,
+    };
+    context
+        .artefacts
+        .iter()
         .map(|item| match item.item_id {
             8230305 => 1,
             8330306 => 2,
             _ => 0,
         })
-        .fold(0_i32, i32::saturating_add)
+        .fold(style, i32::saturating_add)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +151,7 @@ pub enum AttackPredicate {
     Support,
     ExtraAction,
     HasBullet,
+    NonExtraAction,
     NonUltimate,
     Ultimate,
     All(Vec<AttackPredicate>),
@@ -154,6 +172,7 @@ pub(crate) struct AttackContext {
     pub ultimate: bool,
     pub support: bool,
     pub extra_action: bool,
+    pub has_bullet: bool,
 }
 
 impl AttackPredicate {
@@ -167,8 +186,8 @@ impl AttackPredicate {
             Self::ExtraAction => context.extra_action,
             Self::NonUltimate => !context.ultimate,
             Self::Ultimate => context.ultimate,
-            // The first batch does not infer ammunition from an unrelated buff.
-            Self::HasBullet => false,
+            Self::HasBullet => context.has_bullet,
+            Self::NonExtraAction => !context.extra_action,
             Self::All(predicates) => predicates.iter().all(|p| p.matches(context, depth + 1)),
         }
     }
@@ -261,6 +280,10 @@ struct ActiveRouge {
     growth_triggers: BTreeSet<(i64, i64, i32)>,
     summary: BattleSummary,
     incantation: IncantationState,
+    catalyst: Option<catalyst::State>,
+    turn_effects: artefact_turns::TurnLedger,
+    opening_cards_done: bool,
+    difficulty: difficulty::Runtime,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -285,6 +308,13 @@ impl RougeRuntime {
     pub(crate) fn summary(&self) -> Option<BattleSummary> {
         self.active.as_ref().map(|active| active.summary.clone())
     }
+    pub(crate) fn resources(&self) -> Option<Resources> {
+        self.active
+            .as_ref()?
+            .catalyst
+            .as_ref()
+            .map(|state| state.resources.clone())
+    }
 }
 
 pub(crate) fn configure(managers: &mut BattleManagers, context: RougeContext) {
@@ -302,10 +332,12 @@ pub(crate) fn configure(managers: &mut BattleManagers, context: RougeContext) {
     }
     managers.rouge = RougeRuntime {
         active: Some(Box::new(ActiveRouge {
+            catalyst: context.catalyst.as_ref().map(catalyst::State::new),
             context,
             ..Default::default()
         })),
     };
+    difficulty::configure(managers);
 }
 
 const ORIGIN: CommandOrigin = CommandOrigin {
@@ -349,11 +381,72 @@ pub(crate) fn opening(managers: &mut BattleManagers, pool: &TargetPool) -> Vec<R
     managers.rouge.active.as_mut().unwrap().entered = true;
     // Shipped Saliva Bottle skill 91220070 uses 5042 at entry and 5041 on
     // casts. Entry's two ticks include the opening duration settlement.
+    let mut ops = Vec::new();
     if bottle && let Some(uid) = first_ally(managers, pool) {
-        vec![grant(uid, uid, 5042)]
-    } else {
-        vec![]
+        ops.push(grant(uid, uid, 5042));
     }
+    if let Some(entry) = managers
+        .rouge
+        .context()
+        .and_then(|context| context.entry.clone())
+    {
+        ops.extend(artefact_entry::opening(managers, pool, &entry));
+    }
+    let catalyst_opening = catalyst::opening(managers, pool, &ops);
+    ops.extend(catalyst_opening);
+    ops.extend(artefact_entry::paid_opening(managers, pool));
+    ops
+}
+
+pub(crate) fn opening_cards(managers: &mut BattleManagers) -> Vec<RuleOp> {
+    let Some(active) = managers.rouge.active.as_mut() else {
+        return vec![];
+    };
+    if active.opening_cards_done {
+        return vec![];
+    }
+    active.opening_cards_done = true;
+    active
+        .context
+        .entry
+        .as_ref()
+        .map(artefact_entry::opening_cards)
+        .unwrap_or_default()
+}
+
+pub(crate) fn before_card(
+    managers: &BattleManagers,
+    pool: &TargetPool,
+    source_uid: i64,
+    skill_id: i32,
+    card_index: i32,
+    is_ultimate: bool,
+) -> Vec<RuleOp> {
+    artefact_turns::before_card(
+        managers,
+        pool,
+        source_uid,
+        skill_id,
+        card_index,
+        is_ultimate,
+    )
+}
+
+pub(crate) fn round_start(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    round: i32,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
+) -> Vec<RuleOp> {
+    let mut ops = catalyst::round_start(managers, pool, round, determinism);
+    ops.extend(artefact_turns::round_start(
+        managers,
+        pool,
+        round,
+        determinism,
+    ));
+    ops.extend(difficulty::round_start(managers, pool, round, determinism));
+    ops
 }
 
 /// Observe events once at the manager commit boundary, not once per reaction
@@ -363,6 +456,7 @@ pub(crate) fn observe_events(
     managers: &mut BattleManagers,
     pool: &TargetPool,
     _round: i32,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
     events: &[BattleEvent],
 ) -> Vec<RuleOp> {
     let Some(context) = managers.rouge.context() else {
@@ -390,7 +484,20 @@ pub(crate) fn observe_events(
                     managers.rouge.active.as_mut().unwrap().aid_since_settlement = true;
                 }
                 statistics::record_action(managers, action, aid);
-                result.extend(growth::completed_action(managers, pool, action));
+                result.extend(growth::completed_action(
+                    managers,
+                    pool,
+                    action,
+                    determinism,
+                ));
+                result.extend(artefact_turns::action(
+                    managers,
+                    pool,
+                    action,
+                    aid,
+                    determinism,
+                ));
+                result.extend(catalyst::action(managers, action, aid));
                 if bottle
                     && matches!(action.rank, 2 | 3)
                     && !managers.catalog().skill_is_big(action.skill_id)
@@ -420,6 +527,13 @@ pub(crate) fn observe_events(
                     }
                 }
             }
+            BattleEvent::ExPointChanged(change) => {
+                result.extend(catalyst::ultimate_availability(
+                    managers,
+                    pool,
+                    change.target_uid,
+                ));
+            }
             _ => {}
         }
     }
@@ -431,11 +545,12 @@ pub(crate) fn round_end(
     pool: &TargetPool,
     round: i32,
 ) -> Vec<RuleOp> {
+    let mut result = artefact_turns::round_end(managers, pool, round);
     let Some(state) = managers.rouge.active.as_ref() else {
-        return vec![];
+        return result;
     };
     if !state.aid_since_settlement || state.shield_round == Some(round) {
-        return vec![];
+        return result;
     }
     let rate = state
         .context
@@ -452,7 +567,6 @@ pub(crate) fn round_end(
     let state = managers.rouge.active.as_mut().unwrap();
     state.aid_since_settlement = false;
     state.shield_round = Some(round);
-    let mut result = Vec::new();
     if rate > 0 {
         for entity in pool
             .attacker_main
@@ -495,3 +609,9 @@ mod support_tests;
 
 #[cfg(test)]
 mod growth_tests;
+
+#[cfg(test)]
+mod catalyst_tests;
+
+#[cfg(test)]
+mod bullet_tests;

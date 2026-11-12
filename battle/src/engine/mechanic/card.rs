@@ -62,6 +62,9 @@ impl CardMechanic {
                 owner_uid,
                 crate::engine::skill::buff_act::registry::BuffActKind::ExSkillPointChange,
             )
+            .saturating_add(crate::rouge::catalyst::ultimate_cost_offset(
+                managers, owner_uid,
+            ))
             .saturating_add(managers.buff.buff_act_argument_scalar(
                 owner_uid,
                 crate::engine::skill::buff_act::registry::BuffActKind::SpExPointMaxAdd,
@@ -125,6 +128,13 @@ impl CardMechanic {
         entity: &TargetEntity,
     ) -> bool {
         skill_id == entity.ex_skill
+            || managers.rouge.context().is_some_and(|context| {
+                context.support_ultimates.iter().any(|mapping| {
+                    mapping.owner_uid == entity.uid
+                        && mapping.skill_id == skill_id
+                        && mapping.hero_id > 0
+                })
+            })
             || managers
                 .catalog()
                 .skill_is_ultimate_for_model(skill_id, entity.model_id)

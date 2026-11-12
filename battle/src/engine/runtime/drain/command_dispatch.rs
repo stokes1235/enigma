@@ -259,7 +259,7 @@ pub(super) fn drain_command(
     // derived from these committed events, never fired by packet code.
     let mut events = std::iter::from_fn(|| bus.pop()).collect::<Vec<_>>();
     let rouge_followups = if managers.rouge.context().is_some() {
-        crate::rouge::observe_events(managers, pool, context.current_round, &events)
+        crate::rouge::observe_events(managers, pool, context.current_round, determinism, &events)
     } else {
         Vec::new()
     };

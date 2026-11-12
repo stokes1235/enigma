@@ -280,7 +280,21 @@ impl BattleRuntime {
             move_num: Some(0),
             before_cards: Vec::new(),
             deal_card_group: deal_cards,
-            extra_move_act: Some(0),
+            // The client treats -1 as unlimited free movement, and uses the
+            // same value to suppress the movement-only Moxie preview.
+            extra_move_act: Some(
+                if self
+                    .managers
+                    .rouge
+                    .context()
+                    .and_then(|context| context.catalyst.as_ref())
+                    .is_some_and(|catalyst| catalyst.style_id == 4)
+                {
+                    -1
+                } else {
+                    0
+                },
+            ),
             is_gm: Some(false),
         }
     }

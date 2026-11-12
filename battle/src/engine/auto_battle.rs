@@ -264,7 +264,13 @@ fn apply_prefix(
                     from_index,
                     to_index,
                 },
-                1,
+                i32::from(
+                    !managers
+                        .rouge
+                        .context()
+                        .and_then(|context| context.catalyst.as_ref())
+                        .is_some_and(|catalyst| catalyst.style_id == 4),
+                ),
             ),
             RoundCommand::UseUniversal {
                 universal_index,
@@ -297,6 +303,9 @@ fn apply_prefix(
                 let Some((source_uid, skill_id)) = card_identity(card, chosen_skill_id) else {
                     return false;
                 };
+                if source_uid == 0 && managers.rouge.context().is_none() {
+                    return false;
+                }
                 if card_skill_is_blocked(managers, catalog, source_uid, skill_id)
                     || !legal_target(
                         source_uid,
@@ -371,6 +380,10 @@ fn best_candidate(
         .filter_map(|(card_index, card)| {
             let chosen_skill_id = choices.get(card_index).copied().flatten();
             let (source_uid, skill_id) = card_identity(card, chosen_skill_id)?;
+            let scene_rouge_card = source_uid == 0 && managers.rouge.context().is_some();
+            if source_uid == 0 && !scene_rouge_card {
+                return None;
+            }
             let normal_ap_cost = action_point_cost(card, source_uid, skill_id, managers, catalog);
             if normal_ap_cost > normal_ap {
                 return None;
@@ -385,16 +398,27 @@ fn best_candidate(
             if card_skill_is_blocked(managers, catalog, source_uid, skill_id) {
                 return None;
             }
-            let source = live_pool.entity(source_uid)?;
-            let temporary = card.temp_card.unwrap_or_default();
-            // Stage-rule temporary cards are left for the player.
-            if temporary && managers.catalog().skill_hero_id(skill_id) != Some(source.model_id) {
+            let source = live_pool.entity(source_uid);
+            if source.is_none() && !scene_rouge_card {
                 return None;
             }
-            let ultimate = crate::engine::mechanic::card::CardMechanic
-                .is_ultimate_skill(managers, skill_id, source);
+            let temporary = card.temp_card.unwrap_or_default();
+            // Stage-rule temporary cards are left for the player.
+            if temporary
+                && !scene_rouge_card
+                && managers.catalog().skill_hero_id(skill_id)
+                    != source.map(|entity| entity.model_id)
+            {
+                return None;
+            }
+            let ultimate = source.is_some_and(|source| {
+                crate::engine::mechanic::card::CardMechanic
+                    .is_ultimate_skill(managers, skill_id, source)
+            });
             if ultimate
-                && !crate::engine::mechanic::card::CardMechanic.ultimate_ready(managers, source)
+                && source.is_some_and(|source| {
+                    !crate::engine::mechanic::card::CardMechanic.ultimate_ready(managers, source)
+                })
             {
                 return None;
             }
@@ -553,7 +577,28 @@ fn is_shield_buff(buff_id: i32, managers: &BattleManagers) -> bool {
 fn card_identity(card: &CardInfo, chosen_skill_id: Option<i32>) -> Option<(i64, i32)> {
     let source_uid = card.uid?;
     let skill_id = chosen_skill_id.or(card.skill_id)?;
-    (source_uid != 0 && skill_id > 0).then_some((source_uid, skill_id))
+    let scene_rouge_card =
+        source_uid == 0 && card.card_type == Some(sonettobuf::card_info::CardType::RougeSp as i32);
+    (skill_id > 0 && (source_uid != 0 || scene_rouge_card)).then_some((source_uid, skill_id))
+}
+
+#[cfg(test)]
+mod rouge_scene_card_tests {
+    use super::*;
+
+    #[test]
+    fn scene_identity_is_accepted_only_for_an_actual_rouge_special_card() {
+        let mut card = CardInfo {
+            uid: Some(0),
+            skill_id: Some(815000611),
+            ..Default::default()
+        };
+        assert_eq!(card_identity(&card, None), None);
+        card.card_type = Some(sonettobuf::card_info::CardType::RougeSp as i32);
+        assert_eq!(card_identity(&card, None), Some((0, 815000611)));
+        card.skill_id = Some(0);
+        assert_eq!(card_identity(&card, None), None);
+    }
 }
 
 fn action_point_cost(
@@ -564,7 +609,8 @@ fn action_point_cost(
     catalog: &SkillEffectCatalog,
 ) -> i32 {
     i32::from(
-        !card.temp_card.unwrap_or_default()
+        (!card.temp_card.unwrap_or_default()
+            || card.card_type == Some(sonettobuf::card_info::CardType::RougeSp as i32))
             && skill_uses_action_point(
                 &managers.buff.active_features(&managers.hp),
                 source_uid,

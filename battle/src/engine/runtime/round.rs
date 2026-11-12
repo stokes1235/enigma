@@ -153,6 +153,7 @@ impl BattleRuntime {
                 skill.cd = Some(skill.cd.unwrap_or_default().saturating_sub(1).max(0));
             }
         }
+        self.sync_rouge_skill_infos();
         self.round_state.before_cards2.clear();
         self.round_state.team_a_cards2.clear();
         // Next-round start mechanics ran at the end of the preceding command and already own

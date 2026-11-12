@@ -382,6 +382,8 @@ pub enum CardCommand {
     },
     ApplyRedealKeepRanks(CardRedealKeepRanks),
     AddTemporary(CardAddTemporary),
+    AddSupportUltimate(CardAddPrecast),
+    AddRougeSpecial(CardAddPrecast),
     AddCrystal(CardAddCrystal),
     AddPrecast(CardAddPrecast),
     AddSelectedPrecast(CardAddPrecast),
@@ -788,7 +790,9 @@ pub(super) fn execute(
                     add.team_type,
                 ),
             };
-            if add.kind == TemporaryCardKind::HeroSkill && add.origin.key.opcode == 739 {
+            if add.kind == TemporaryCardKind::HeroSkill
+                && matches!(add.origin.key.opcode, 739 | 60032)
+            {
                 manager.mark_hero_precast(hand_index);
             }
             operation = Some(CardChange::SpCardAdd {
@@ -806,6 +810,72 @@ pub(super) fn execute(
                     TemporaryCardKind::HeroSkill => CardChangeKind::HeroTemporaryAdded,
                     TemporaryCardKind::SupportSkill => CardChangeKind::HeroTemporaryAdded,
                 },
+                Some(card),
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+        }
+        CardCommand::AddSupportUltimate(add) => {
+            if add.card.uid.unwrap_or_default() <= 0
+                || add.card.hero_id.unwrap_or_default() <= 0
+                || add.card.skill_id.unwrap_or_default() <= 0
+                || add.card.card_type != Some(3)
+                || add.card.temp_card.unwrap_or_default()
+            {
+                return Err(CardCommandError::InvalidCommand);
+            }
+            if manager.hand().iter().any(|card| {
+                card.uid == add.card.uid
+                    && card.skill_id == add.card.skill_id
+                    && card.card_type == Some(3)
+            }) {
+                (
+                    Some(add.origin),
+                    CardChangeKind::UltimateAvailabilityChanged,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            } else {
+                let card = manager.add_to_hand(add.card.clone());
+                operation = Some(CardChange::SpCardAdd {
+                    target_uid: card.uid.unwrap(),
+                    skill_id: card.skill_id.unwrap(),
+                    reserve_id: i64::from(card.hero_id.unwrap()),
+                    team_type: 1,
+                });
+                (
+                    Some(add.origin),
+                    CardChangeKind::HeroTemporaryAdded,
+                    Some(card),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        }
+        CardCommand::AddRougeSpecial(add) => {
+            if add.card.uid != Some(0)
+                || add.card.card_type != Some(1)
+                || add.card.temp_card != Some(true)
+                || !matches!(add.card.skill_id, Some(800060003 | 800070003))
+            {
+                return Err(CardCommandError::InvalidCommand);
+            }
+            let index = manager.hand().len();
+            let card = manager.add_to_hand(add.card.clone());
+            manager.track_temporary(index);
+            operation = Some(CardChange::SpCardAdd {
+                target_uid: 0,
+                skill_id: card.skill_id.unwrap(),
+                reserve_id: 0,
+                team_type: 1,
+            });
+            (
+                Some(add.origin),
+                CardChangeKind::HeroTemporaryAdded,
                 Some(card),
                 None,
                 Vec::new(),

@@ -63,6 +63,10 @@ impl SkillExecution {
             return;
         }
         let context = crate::rouge::AttackContext {
+            has_bullet: managers.buff.buff_act_type_count(
+                &[invocation.plan.source_uid],
+                crate::engine::skill::buff_act::registry::BuffActKind::Bullet,
+            ) > 0,
             rank: managers.catalog().skill_rank(invocation.plan.skill_id),
             ultimate: catalog.is_big_skill(invocation.plan.skill_id),
             support: crate::rouge::is_support_card(

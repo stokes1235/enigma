@@ -91,23 +91,39 @@ fn plan(
     let carrier_uid = managers
         .buff
         .buff_family_carrier_uid(command.target_uid, command.buff_id);
-    let (amount_attr, amount_rate) =
-        if carrier_uid.is_none() && command.scope == ShieldScope::Entity {
+    let cumulative = (command.scope == ShieldScope::Entity)
+        .then(|| {
             crate::engine::skill::buff_act::shield::cumulative_attr_rate(
                 command.buff_id,
                 &managers.buff,
             )
-            .unwrap_or((command.amount_attr, command.amount_rate))
+        })
+        .flatten();
+    let (amount_attr, amount_rate) =
+        if carrier_uid.is_none() && command.scope == ShieldScope::Entity {
+            cumulative.unwrap_or((command.amount_attr, command.amount_rate))
         } else {
             (command.amount_attr, command.amount_rate)
         };
-    let basis = managers.origin_attribute(command.source_uid, amount_attr);
+    // A scene-owned self-based shield has no caster body/HP. Current Narwhal
+    // Bone Medication uses precisely 501#1#101#500: each recipient's own Max
+    // HP, including for the team-wide card. Resolve its numeric source from
+    // that recipient, as ordinary scene-owned Buff grants already do, while
+    // preserving the scene UID in attribution and packet projection. Other
+    // shield formulas and all actual entity casters retain their old source.
+    let attribute_source_uid =
+        if cumulative.is_some() && crate::engine::fight::rules::is_side_uid(command.source_uid) {
+            command.target_uid
+        } else {
+            command.source_uid
+        };
+    let basis = managers.origin_attribute(attribute_source_uid, amount_attr);
     let multiplier_bonus = command
         .multiplier_bonus
-        .map(|(attr, rate)| (managers.origin_attribute(command.source_uid, attr), rate));
+        .map(|(attr, rate)| (managers.origin_attribute(attribute_source_uid, attr), rate));
     let amount = shield_amount(basis, amount_rate, multiplier_bonus);
     let max = managers
-        .origin_attribute(command.source_uid, command.max_attr)
+        .origin_attribute(attribute_source_uid, command.max_attr)
         .saturating_mul(command.max_rate)
         / 1000;
 
@@ -231,6 +247,10 @@ fn plan(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shield/scene_tests.rs"]
+mod scene_tests;
 
 fn shield_amount(basis: i32, rate: i32, multiplier_bonus: Option<(i32, i32)>) -> i32 {
     let rate = i128::from(rate) * 1_000

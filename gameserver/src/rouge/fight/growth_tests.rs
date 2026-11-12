@@ -327,6 +327,296 @@ fn cast_rank_two(battle: &mut battle::Battle) -> i32 {
 }
 
 #[tokio::test]
+async fn entry_resources_are_frozen_before_battle_and_commit_atomically() {
+    let f = Fixture::new().await;
+    let mut bag: RunBag = serde_json::from_str(&f.run().await.bag).unwrap();
+    let disk = bag.add(8140101).unwrap().uid;
+    bag.place(disk, -1, -1, 0).unwrap();
+    f.store_bag(&bag).await;
+    sqlx::query("UPDATE user_rouge_run SET power = 20 WHERE user_id = ? AND season = 1")
+        .bind(USER)
+        .execute(&f.db)
+        .await
+        .unwrap();
+    let request = sonettobuf::StartDungeonRequest {
+        chapter_id: Some(ROUGE_CHAPTER_ID),
+        episode_id: Some(f.episode),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+    let mut active = ActiveBattle::prepare(&f.db, USER, f.episode, f.battle, request)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.run().await.power,
+        20,
+        "preparation must not write entry effects"
+    );
+    assert_eq!(active.runtime.rouge_resources().unwrap().power, 22);
+    let attacker = active.runtime.reconnect_state().0.attacker.unwrap();
+    assert_eq!(
+        attacker.power,
+        Some(15),
+        "ordinary battle energy is separate"
+    );
+    assert!(
+        attacker
+            .ex_team_str
+            .as_deref()
+            .unwrap()
+            .starts_with("0#22#40#")
+    );
+    assert_eq!(
+        attacker
+            .skill_infos
+            .iter()
+            .map(|skill| (skill.skill_id, skill.need_power, skill.r#type))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(800000002), Some(5), Some(1)),
+            (Some(800000001), Some(3), Some(1))
+        ],
+    );
+
+    // A competing map change invalidates the complete prepared snapshot; it
+    // must neither grant the entry resource nor create an active fight.
+    sqlx::query("UPDATE user_rouge_run SET coin = 1 WHERE user_id = ? AND season = 1")
+        .bind(USER)
+        .execute(&f.db)
+        .await
+        .unwrap();
+    assert!(
+        active
+            .activate(&f.db, USER, &Default::default())
+            .await
+            .is_err()
+    );
+    assert_eq!((f.run().await.power, f.run().await.coin), (20, 1));
+    assert!(
+        battle_db::load_active_fight(&f.db, USER)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    sqlx::query("UPDATE user_rouge_run SET coin = 0 WHERE user_id = ? AND season = 1")
+        .bind(USER)
+        .execute(&f.db)
+        .await
+        .unwrap();
+    active
+        .activate(&f.db, USER, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(f.run().await.power, 22);
+    active
+        .use_cloth_skill(sonettobuf::UseClothSkillRequest {
+            skill_id: Some(800000002),
+            r#type: Some(2),
+            from_id: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(active.runtime.rouge_resources().unwrap().power, 17);
+    assert_eq!(
+        f.run().await.power,
+        22,
+        "combat spending is saved only at settlement"
+    );
+    battle_db::update_fight_checkpoint(
+        &f.db,
+        USER,
+        active.fight_id.unwrap(),
+        &active.checkpoint_json().unwrap(),
+    )
+    .await
+    .unwrap();
+    let record = battle_db::load_active_fight(&f.db, USER)
+        .await
+        .unwrap()
+        .unwrap();
+    let restored = ActiveBattle::restore(&f.db, USER, record).await.unwrap();
+    assert_eq!(restored.runtime.rouge_resources().unwrap().power, 17);
+    assert_eq!(
+        f.run().await.power,
+        22,
+        "reconnect must not grant entry twice"
+    );
+}
+
+#[tokio::test]
+async fn actual_catalyst_spend_is_saved_once_with_victory() {
+    let f = Fixture::new().await;
+    let built = f.build().await;
+    let mut active = ActiveBattle {
+        fight_id: Some(f.fight_id().await),
+        chapter_id: ROUGE_CHAPTER_ID,
+        episode_id: f.episode,
+        battle_id: f.battle,
+        runtime: start_controlled(built, f.actor, 1),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+    active
+        .use_cloth_skill(sonettobuf::UseClothSkillRequest {
+            skill_id: Some(800000002),
+            r#type: Some(2),
+            from_id: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(active.runtime.rouge_resources().unwrap().spent_power, 5);
+    assert_eq!(f.run().await.power, 40);
+    cast_rank_two(&mut active.runtime);
+    assert_eq!(active.runtime.outcome(), battle::BattleOutcome::Victory);
+    settle_active(&f.db, USER, &active).await.unwrap();
+    assert_eq!(f.run().await.power, 35);
+    assert_eq!(flow::details(&f.run().await).consume_power, 5);
+    assert!(settle_active(&f.db, USER, &active).await.is_err());
+    assert_eq!(f.run().await.power, 35);
+    assert_eq!(flow::details(&f.run().await).consume_power, 5);
+}
+
+#[tokio::test]
+async fn catalyst_spending_and_recovery_update_the_right_entrust_counter() {
+    let f = Fixture::new().await;
+    let mut base = f.run().await;
+    base.coin = 50;
+    base.spent_coin = 4;
+    let mut details = flow::details(&base);
+    details.consume_power = 2;
+    base.details = serde_json::to_string(&details).unwrap();
+    let initial = battle::rouge::Catalyst {
+        coin: 50,
+        power: 40,
+        power_limit: 40,
+        ..Default::default()
+    };
+    let result = battle::rouge::Resources {
+        coin: 47,
+        power: 38,
+        power_limit: 40,
+        spent_coin: 10,
+        spent_power: 5,
+    };
+    for (kind, amount) in [(1, 7), (2, 10), (5, 3), (6, 5)] {
+        let entrust = config::configs::get()
+            .rouge_entrust
+            .iter()
+            .find(|entry| entry.r#type == kind)
+            .expect("test requires each resource entrust type");
+        let mut run = base.clone();
+        run.middle_state = serde_json::json!({
+            "pieces": [], "entrust_id": entrust.id, "entrust_progress": 0,
+            "completed_entrusts": [], "middle_layer_id": run.middle_layer_id
+        })
+        .to_string();
+        crate::logic::rouge::apply_battle_resources(&mut run, &initial, &result).unwrap();
+        let middle: serde_json::Value = serde_json::from_str(&run.middle_state).unwrap();
+        assert_eq!(middle["entrust_progress"], amount);
+        assert_eq!((run.coin, run.power, run.spent_coin), (47, 38, 14));
+        assert_eq!(flow::details(&run).consume_power, 7);
+    }
+    let mut stale = base.clone();
+    stale.power -= 1;
+    assert!(crate::logic::rouge::apply_battle_resources(&mut stale, &initial, &result).is_err());
+    assert_eq!((stale.power, stale.spent_coin), (39, 4));
+    let mut invalid = result.clone();
+    invalid.spent_power = 1; // a net loss of two cannot arise from spending one
+    assert!(crate::logic::rouge::apply_battle_resources(&mut base, &initial, &invalid).is_err());
+    assert_eq!((base.power, base.spent_coin), (40, 4));
+}
+
+#[tokio::test]
+async fn placed_turn_artefacts_trigger_from_a_real_cast_and_round_transition() {
+    let f = Fixture::new().await;
+    let mut bag: RunBag = serde_json::from_str(&f.run().await.bag).unwrap();
+    for item_id in [8110213, 8130803, 8230027, 8210314] {
+        let uid = bag.add(item_id).unwrap().uid;
+        bag.place(uid, -1, -1, 0).unwrap();
+    }
+    f.store_bag(&bag).await;
+    let built = f.build().await;
+    let mut fight = start_controlled(built, f.actor, 1_000_000);
+    let amount = |fight: &battle::Battle, buff_id: i32| {
+        fight
+            .entity_info(f.actor)
+            .unwrap()
+            .buffs
+            .iter()
+            .filter(|buff| buff.buff_id == Some(buff_id))
+            .map(|buff| buff.layer.unwrap_or_default())
+            .sum::<i32>()
+    };
+    assert_eq!(amount(&fight, 90071), 1, "clockwork triggers at opening");
+    cast_rank_two(&mut fight);
+    assert_eq!(amount(&fight, 90091), 5, "the cane follows the real cast");
+    assert!(
+        amount(&fight, 90011) >= 2,
+        "the slingshot grants Lucky for the selected cast"
+    );
+    assert_eq!(amount(&fight, 90001), 1, "the glove triggers at round end");
+    assert_eq!(
+        amount(&fight, 90071),
+        2,
+        "clockwork triggers again in round two"
+    );
+}
+
+#[tokio::test]
+async fn pendulum_exposes_free_moves_and_does_not_grant_moxie_for_moving() {
+    let f = Fixture::new().await;
+    sqlx::query("UPDATE user_rouge_start SET style = 4 WHERE user_id = ? AND season = 1")
+        .bind(USER)
+        .execute(&f.db)
+        .await
+        .unwrap();
+    let mut fight = start_controlled(f.build().await, f.actor, 1_000_000);
+    let mut control_built = f.build().await;
+    let control_context = control_built.rouge.as_mut().unwrap();
+    control_context.catalyst.as_mut().unwrap().style_id = 1;
+    // Match Pendulum's +2 hand size without changing the move rule. This
+    // keeps the real seeded hand and every composition identical.
+    control_context.artefacts.push(battle::rouge::Artefact {
+        uid: 9999, item_id: 8330306, ..Default::default()
+    });
+    let mut control = start_controlled(control_built, f.actor, 1_000_000);
+    assert_eq!(fight.card_info_push().extra_move_act, Some(-1));
+    assert_eq!(control.card_info_push().extra_move_act, Some(0));
+    let hand = fight.card_info_push().card_group;
+    assert_eq!(hand, control.card_info_push().card_group);
+    let (left, right) = hand
+        .iter()
+        .enumerate()
+        .find_map(|(left, card)| {
+            hand.iter()
+                .enumerate()
+                .skip(left + 2)
+                .find_map(|(right, other)| {
+                    (card.uid == other.uid
+                        && card.skill_id == other.skill_id
+                        && !card.temp_card.unwrap_or_default()
+                        && !other.temp_card.unwrap_or_default())
+                    .then_some((left, right))
+                })
+        })
+        .expect("seeded ordinary hand supplies a non-adjacent pair");
+    let request = BeginRoundRequest {
+        opers: vec![BeginRoundOper {
+            oper_type: Some(1), param1: Some(right as i32 + 1),
+            param2: Some(left as i32 + 2), ..Default::default()
+        }], ..Default::default()
+    };
+    battle::dungeon::begin_round(&mut fight, request.clone()).unwrap();
+    battle::dungeon::begin_round(&mut control, request).unwrap();
+    assert_eq!(
+        fight.entity_info(f.actor).unwrap().ex_point.unwrap_or_default() + 1,
+        control.entity_info(f.actor).unwrap().ex_point.unwrap_or_default(),
+        "identical compositions still grant Moxie; only the normal move adds one more"
+    );
+}
+
+#[tokio::test]
 async fn actual_scarab_cast_settles_once_from_frozen_source_and_next_fight_applies_growth_once() {
     let f = Fixture::new().await;
     assert!(can_start(&f.db, USER, f.episode).await.unwrap());

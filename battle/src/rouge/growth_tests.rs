@@ -316,6 +316,80 @@ fn distinct_actual_card_types_trigger_resonance_and_keep_exact_temporary_ownersh
 }
 
 #[test]
+fn syntony_level_three_grants_support_and_relevant_artefact_states_from_real_casts() {
+    let mut frozen = context(&[8120406, 8130403, 8130404], 0);
+    frozen.catalyst = Some(Catalyst {
+        style_id: 5,
+        ..Default::default()
+    });
+    let mut h = Harness::new(Some(frozen));
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.rouge.summary().unwrap().syntony_max_level, 2);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90281), 2);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90281), 2);
+    assert_eq!(
+        h.managers.buff.buff_id_amount(-1, 90101) + h.managers.buff.buff_id_amount(-2, 90101),
+        18
+    );
+    h.cast(10, 30030111, true, false);
+    assert_eq!(h.managers.rouge.summary().unwrap().syntony_max_level, 3);
+    assert_eq!(
+        h.managers.buff.buff_id_amount(10, 90331) + h.managers.buff.buff_id_amount(11, 90331),
+        1
+    );
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90281), 2);
+    assert_eq!(
+        h.managers.buff.buff_id_amount(-1, 90101) + h.managers.buff.buff_id_amount(-2, 90101),
+        28
+    );
+    end_incantation_round(&mut h.managers);
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(
+        h.managers.buff.buff_id_amount(10, 90281),
+        2,
+        "root is once per fight"
+    );
+}
+
+#[test]
+fn resonance_crown_and_catalyst_react_to_real_level_crossings() {
+    let mut frozen = context(&[8320506], 0);
+    frozen.catalyst = Some(Catalyst {
+        style_id: 6,
+        ..Default::default()
+    });
+    let mut h = Harness::new(Some(frozen));
+    h.catalog.insert(ParsedSkillEffect {
+        skill_id: 30020121,
+        slots: vec![],
+    });
+    h.catalog.insert_damage_rate(30020121, 1000);
+    h.catalog.insert_logic_target(30020121, 1);
+    h.catalog.insert_effect_tag(30020121, 1);
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    assert_eq!(h.managers.rouge.summary().unwrap().resonance_max_level, 2);
+    for id in [90001, 90031, 90021] {
+        assert_eq!(h.managers.buff.buff_id_amount(10, id), 1);
+        assert_eq!(h.managers.buff.buff_id_amount(11, id), 1);
+    }
+    h.cast(10, 30020121, true, false);
+    assert_eq!(h.managers.rouge.summary().unwrap().resonance_max_level, 3);
+    for id in [90001, 90031, 90021] {
+        assert_eq!(h.managers.buff.buff_id_amount(10, id), 2);
+    }
+    assert_eq!(
+        h.managers.buff.buff_id_amount(10, 90331) + h.managers.buff.buff_id_amount(11, 90331),
+        1
+    );
+}
+
+#[test]
 fn level_limit_unlock_changes_real_casts_without_repeating_permanent_growth() {
     for limit in [5, 6] {
         let mut frozen = context(&[8310405], 10);

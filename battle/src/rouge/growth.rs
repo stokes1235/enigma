@@ -36,6 +36,7 @@ pub(super) fn completed_action(
     managers: &mut BattleManagers,
     pool: &TargetPool,
     action: &ActionEvent,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
 ) -> Vec<RuleOp> {
     let Some(context) = managers.rouge.context() else {
         return vec![];
@@ -108,12 +109,25 @@ pub(super) fn completed_action(
     if !matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9) {
         return vec![];
     }
+    let bonuses = super::catalyst::level_bonus(managers);
+    let style = managers
+        .rouge
+        .context()
+        .and_then(|context| context.catalyst.as_ref())
+        .map_or(0, |catalyst| catalyst.style_id);
+    let items = managers
+        .rouge
+        .context()
+        .map(|context| context.artefacts.clone())
+        .unwrap_or_default();
     let state = managers.rouge.active.as_mut().unwrap();
     let incantation = &mut state.incantation;
     let count = incantation.casts_by_type.entry(kind).or_default();
     *count = count.saturating_add(1);
     let new_syntony = if *count >= 3 {
-        (*count - 2).min(rules.syntony_level_limit.clamp(1, 7))
+        (*count - 2)
+            .saturating_add(bonuses.0)
+            .min(rules.syntony_level_limit.clamp(1, 7))
     } else {
         0
     };
@@ -124,7 +138,9 @@ pub(super) fn completed_action(
     }
     let types = incantation.casts_by_type.len() as i32;
     let new_resonance = if types >= 3 {
-        (types - 2).min(rules.resonance_level_limit.clamp(1, 7))
+        (types - 2)
+            .saturating_add(bonuses.1)
+            .min(rules.resonance_level_limit.clamp(1, 7))
     } else {
         0
     };
@@ -154,10 +170,93 @@ pub(super) fn completed_action(
     if new_resonance > old_resonance {
         ops.push(level_marker(target, 184, new_resonance, 0));
     }
+    // A level can jump over two or three after a catalyst bonus; crossing the
+    // threshold is still one trigger. Random recipients are living fielded
+    // allies, and a missing support mapping never fabricates another hero.
+    if (style == 5 && old_syntony < 3 && new_syntony >= 3)
+        || (style == 6 && old_resonance < 3 && new_resonance >= 3)
+    {
+        let allies = pool
+            .attacker_main
+            .iter()
+            .filter(|entity| managers.hp.current(entity.uid) > 0)
+            .map(|entity| entity.uid)
+            .collect::<Vec<_>>();
+        if let Some(index) = determinism.lua_random_index(allies.len()) {
+            ops.push(super::grant(allies[index], allies[index], 90331));
+        }
+    }
+    if old_syntony < 2 && new_syntony >= 2 {
+        for item in &items {
+            match item.item_id {
+                8120406 => {
+                    // One actual trigger per artefact per fight, even if a
+                    // different incantation type later reaches level two.
+                    let state = managers.rouge.active.as_mut().unwrap();
+                    if state.growth_triggers.insert((item.uid, 0, 10002)) {
+                        for entity in &pool.attacker_main {
+                            if managers.hp.current(entity.uid) > 0 {
+                                ops.push(grant_stacks(
+                                    entity.uid,
+                                    entity.uid,
+                                    90281,
+                                    2_i32.saturating_add(item.count2),
+                                ));
+                            }
+                        }
+                    }
+                }
+                8130403 => {
+                    for enemy in &pool.defender_main {
+                        if managers.hp.current(enemy.uid) > 0 {
+                            ops.push(grant_stacks(action.source_uid, enemy.uid, 90101, 4));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if new_syntony > old_syntony {
+        for _ in items.iter().filter(|item| item.item_id == 8130404) {
+            let enemies = pool
+                .defender_main
+                .iter()
+                .filter(|entity| managers.hp.current(entity.uid) > 0)
+                .map(|entity| entity.uid)
+                .collect::<Vec<_>>();
+            if let Some(index) = determinism.lua_random_index(enemies.len()) {
+                ops.push(grant_stacks(action.source_uid, enemies[index], 90101, 10));
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for _ in items.iter().filter(|item| item.item_id == 8320506) {
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    for buff_id in [90001, 90031, 90021] {
+                        ops.push(grant_stacks(entity.uid, entity.uid, buff_id, 1));
+                    }
+                }
+            }
+        }
+    }
     if new_syntony > old_syntony || new_resonance > old_resonance {
         update_round_attributes(managers, pool);
     }
     ops
+}
+
+fn grant_stacks(source_uid: i64, target_uid: i64, buff_id: i32, amount: i32) -> RuleOp {
+    RuleOp::Command(BattleCommand::Buff(BuffCommand::Grant(BuffGrant {
+        origin: ORIGIN,
+        source_uid,
+        target_uid,
+        buff_id,
+        amount: Some(amount.max(0)),
+        occurrences: 1,
+        child_uid_reservations: 0,
+    })))
 }
 
 fn level_marker(target_uid: i64, effect_type: i32, level: i32, kind: i32) -> RuleOp {
@@ -267,6 +366,7 @@ fn update_round_attributes(managers: &mut BattleManagers, pool: &TargetPool) {
 }
 
 pub(crate) fn end_round(managers: &mut BattleManagers) {
+    super::catalyst::clear_round_boosts(managers);
     let Some(state) = managers.rouge.active.as_mut() else {
         return;
     };

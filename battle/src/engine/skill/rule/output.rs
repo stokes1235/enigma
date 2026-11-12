@@ -71,6 +71,8 @@ pub enum BattleCommand {
     Shield(ShieldCommand),
     ExPoint(ExPointCommand),
     Eureka(EurekaCommand),
+    /// Base Rouge magic; separate from eureka and ordinary cloth power.
+    RougePowerChange(i32),
     Gauge(GaugeCommand),
     StartRawGaugeBatch(GaugeBatchId, Vec<GaugeCommand>),
     ContinueRawGaugeBatch(GaugeBatchId),

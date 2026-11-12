@@ -48,6 +48,7 @@ pub enum BehaviorKind {
     DelExPointNotImmunity,
     ChangePower,
     RecoverPower,
+    RougePowerChange,
     RecoverPowerAndDelCardsUseSkill,
     AddPowerByCritCount,
     TotalSkillRankToPower,

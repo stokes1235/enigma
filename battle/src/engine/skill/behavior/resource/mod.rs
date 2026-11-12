@@ -389,6 +389,12 @@ pub fn rule_ops(context: BehaviorOpContext<'_>, behavior: &ParsedBehavior) -> Op
         BehaviorKind::ChangePower | BehaviorKind::RecoverPower => {
             power_args(&behavior.args).map(|(power_id, delta)| vec![eureka(power_id, delta)])
         }
+        BehaviorKind::RougePowerChange => {
+            context.managers.rouge.context()?;
+            Some(vec![RuleOp::Command(BattleCommand::RougePowerChange(
+                behavior.arg(0)?,
+            ))])
+        }
         BehaviorKind::RecoverPowerAndDelCardsUseSkill => {
             let [skill_id, target_rule] = behavior.args.as_slice() else {
                 return None;

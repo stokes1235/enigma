@@ -19,6 +19,32 @@ pub async fn build_fight(
     options: FightOptions,
     params: Option<&str>,
 ) -> Result<BuiltFight> {
+    build_fight_with_rouge_run(
+        db,
+        player_id,
+        episode_id,
+        battle_id,
+        fight_group,
+        options,
+        params,
+        None,
+    )
+    .await
+}
+
+/// A prepared Rouge entry supplies the projected run so its combat snapshot
+/// already includes the entry artefact changes that will be atomically saved.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_fight_with_rouge_run(
+    db: &SqlitePool,
+    player_id: i64,
+    episode_id: i32,
+    battle_id: i32,
+    fight_group: &FightGroup,
+    options: FightOptions,
+    params: Option<&str>,
+    rouge_run: Option<&database::models::game::rouge::RougeRun>,
+) -> Result<BuiltFight> {
     let catalog = battle::catalog::BattleCatalog::new(config::configs::get());
     let plan = BattleRosterPlan::configured(
         catalog,
@@ -43,11 +69,23 @@ pub async fn build_fight(
         .get(episode_id)
         .is_some_and(|episode| episode.chapter_id == 2901)
     {
-        let run = database::db::game::rouge::get_run(db, player_id, 1)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("missing Rouge run"))?;
+        let run = match rouge_run {
+            Some(run) if run.user_id == player_id && run.season == 1 => run.clone(),
+            Some(_) => anyhow::bail!("Rouge entry snapshot belongs to another run"),
+            None => database::db::game::rouge::get_run(db, player_id, 1)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("missing Rouge run"))?,
+        };
         let team: sonettobuf::RougeTeamInfo = serde_json::from_str(&run.team)?;
         let start = database::db::game::rouge::get_or_create_start(db, player_id, 1).await?;
+        let difficulty = crate::rouge::difficulty::for_run(config::configs::get(), &start, &run)?;
+        crate::rouge::difficulty::apply_to_defenders(
+            config::configs::get(),
+            &mut built.fight,
+            &mut built.ex_attributes,
+            &mut built.sp_attributes,
+            &difficulty,
+        );
         let mut rates = crate::rouge::flow::attribute_rates(&start, &run);
         let bag: crate::rouge::bag::RunBag = serde_json::from_str(&run.bag)?;
         let effects = crate::rouge::artifact_rules::evaluate_battle_with_state(
@@ -70,6 +108,40 @@ pub async fn build_fight(
             &team,
         );
         let mut context = battle::rouge::RougeContext::default();
+        context.difficulty = crate::rouge::difficulty::runtime_context(&difficulty, &built.fight);
+        context.entry = Some(crate::rouge::artifact_rules::entry_context(
+            config::configs::get(),
+            &bag,
+            run.coin,
+            0,
+        ));
+        let layout = crate::rouge::artifact_rules::layout_counts(&bag);
+        let slots = built
+            .fight
+            .attacker
+            .as_ref()
+            .map(|attacker| {
+                team.battle_hero_list
+                    .iter()
+                    .filter_map(|slot| {
+                        let owner = attacker
+                            .entitys
+                            .iter()
+                            .find(|entity| entity.model_id == slot.hero_id)?;
+                        Some((slot.index?, owner.uid?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        context.catalyst = Some(battle::rouge::Catalyst {
+            style_id: start.style,
+            coin: run.coin,
+            power: run.power,
+            power_limit: run.power_limit,
+            slots,
+            disk_count: layout.disk_count,
+            epic_count: layout.epic_count,
+        });
         if let Some(attacker) = &built.fight.attacker {
             let actors: Vec<i64> = attacker
                 .entitys
@@ -153,7 +225,7 @@ pub async fn build_fight(
                             let (rank, ex_level): (i32, i32) = sqlx::query_as(
                                 "SELECT rank, ex_skill_level FROM heroes WHERE user_id = ? AND hero_id = ?",
                             ).bind(player_id).bind(support).fetch_one(db).await?;
-                            let (first, second, _) = battle::hero::active_skills(
+                            let (first, second, ultimate) = battle::hero::active_skills(
                                 config::configs::get(),
                                 support,
                                 rank,
@@ -166,6 +238,15 @@ pub async fn build_fight(
                                     hero_id: support,
                                     skill_ids,
                                 });
+                            }
+                            if ultimate > 0 {
+                                context
+                                    .support_ultimates
+                                    .push(battle::rouge::SupportUltimate {
+                                        owner_uid: uid,
+                                        hero_id: support,
+                                        skill_id: ultimate,
+                                    });
                             }
                         }
                     }
@@ -198,6 +279,7 @@ pub async fn build_fight(
                 P::RankAtLeast(rank) => B::RankAtLeast(rank),
                 P::Support => B::Support,
                 P::ExtraAction => B::ExtraAction,
+                P::NonExtraAction => B::NonExtraAction,
                 P::HasBullet => B::HasBullet,
                 P::NonUltimate => B::NonUltimate,
                 P::Ultimate => B::Ultimate,
@@ -216,6 +298,23 @@ pub async fn build_fight(
                 })
                 .collect();
         if let Some(attacker) = &mut built.fight.attacker {
+            // Original Rouge uses the catalyst's active skills (type 1) on
+            // this panel. The capture lists them in reverse config order.
+            if let Some(style) = config::configs::get().rouge_style.get(start.style) {
+                attacker.skill_infos = style
+                    .active_skills
+                    .split('#')
+                    .rev()
+                    .filter_map(|id| id.parse::<i32>().ok())
+                    .filter_map(|id| config::configs::get().rouge_active_skill.get(id))
+                    .map(|skill| sonettobuf::PlayerSkillInfo {
+                        skill_id: Some(skill.id),
+                        cd: Some(0),
+                        need_power: Some(skill.power_cost),
+                        r#type: Some(1),
+                    })
+                    .collect();
+            }
             // FightHelper uses the fourth '#' segment for support-card rank
             // transitions. Keys are the deployed owners; expose their selected
             // support group's actual replacement-aware skill sequence.

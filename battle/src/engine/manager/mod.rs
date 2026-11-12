@@ -1338,6 +1338,7 @@ impl BattleManagers {
         self.buff.register_entity(entity, team_type);
         let entity_order = self.entity.ordered_uids().collect::<Vec<_>>();
         self.buff.sync_entity_order(&entity_order);
+        crate::rouge::difficulty::register_enemy(self, entity.uid.unwrap_or_default());
     }
 
     pub(crate) fn promote_reserves(
@@ -1557,6 +1558,7 @@ impl BattleManagers {
     ///
     /// This is a serialization boundary, not a second mutation path.
     pub fn sync_entities(&self, fight: &mut Fight) {
+        crate::rouge::catalyst::sync_team(self, fight);
         self.entity.sync_to_fight(fight);
         for entity in entities_mut(fight) {
             self.project_entity_state(entity);

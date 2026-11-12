@@ -910,6 +910,7 @@ fn direct_damage_trace(
             .map(crate::engine::skill::buff_act::career_ratio_bonus)
             .sum::<i32>()
             + career_ratio_bonus
+            + source.rouge_stronger_afflatus
     } else {
         1000
     };

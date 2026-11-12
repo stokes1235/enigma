@@ -579,19 +579,27 @@ fn run_player_card_ops(
             _ => None,
         };
         let moved_ex_point = match &op {
-            PlayerCardOp::Move { from_index, .. } => managers
-                .card
-                .hand()
-                .get(*from_index)
-                .and_then(|card| card.uid)
-                .filter(|uid| managers.entity.team_type(*uid) == Some(team))
-                .and_then(|owner_uid| {
-                    let delta = 1_i32.saturating_add(managers.buff.buff_act_scalar(
-                        owner_uid,
-                        crate::engine::skill::buff_act::registry::BuffActKind::ExPointCardMove,
-                    ));
-                    (delta > 0).then_some((owner_uid, delta))
-                }),
+            PlayerCardOp::Move { from_index, .. }
+                if !managers
+                    .rouge
+                    .context()
+                    .and_then(|context| context.catalyst.as_ref())
+                    .is_some_and(|catalyst| catalyst.style_id == 4) =>
+            {
+                managers
+                    .card
+                    .hand()
+                    .get(*from_index)
+                    .and_then(|card| card.uid)
+                    .filter(|uid| managers.entity.team_type(*uid) == Some(team))
+                    .and_then(|owner_uid| {
+                        let delta = 1_i32.saturating_add(managers.buff.buff_act_scalar(
+                            owner_uid,
+                            crate::engine::skill::buff_act::registry::BuffActKind::ExPointCardMove,
+                        ));
+                        (delta > 0).then_some((owner_uid, delta))
+                    })
+            }
             _ => None,
         };
         let command = if let Some(card_index) = blocked_card_index {
@@ -663,6 +671,8 @@ fn run_player_card_ops(
                 && managers.ex_point.kind(played.caster_uid) == 0
                 && catalog.grants_resource_on_card_play(played.skill_id)
                 && played.card.card_type != Some(sonettobuf::card_info::CardType::Skill3 as i32)
+                && !(managers.rouge.context().is_some()
+                    && matches!(played.card.card_type, Some(2 | 3)))
                 && !crate::engine::manager::card::deck::has_enchant_type(
                     &played.card,
                     crate::engine::manager::card::EnchantedType::Lorenz,
@@ -830,7 +840,17 @@ fn run_player_card_ops(
             skill.plan.skill_id = played.skill_id;
         }
         let source_uid = skill.plan.source_uid;
-        let source_alive = !is_card_action || managers.hp.current(source_uid) > 0;
+        // Rouge's medication cards belong to the scene (UID 0), not to a
+        // character. Only the actual played Rouge card may use that exception.
+        let scene_rouge_card = source_uid == 0
+            && managers.rouge.context().is_some()
+            && managers.card.played().iter().any(|played| {
+                played.card_index == skill.card_index
+                    && played.card.card_type
+                        == Some(sonettobuf::card_info::CardType::RougeSp as i32)
+            });
+        let source_alive =
+            !is_card_action || scene_rouge_card || managers.hp.current(source_uid) > 0;
         let is_ultimate = pool.entity(source_uid).is_some_and(|entity| {
             crate::engine::mechanic::card::CardMechanic.is_ultimate_skill(
                 managers,
@@ -1139,7 +1159,7 @@ pub(super) fn run_active_action(
         grants_ex_point,
         grant_after_action,
         queued_resource_delta,
-        prelude,
+        mut prelude,
     } = request;
     let mut result = DrainResult::default();
     if skill.mode == crate::engine::skill::action::SkillExecutionMode::Nested {
@@ -1236,6 +1256,14 @@ pub(super) fn run_active_action(
             effect_type: sonettobuf::effect_type_enum::EffectType::Expointchange as i32,
         })
     });
+    prelude.extend(crate::rouge::before_card(
+        managers,
+        pool,
+        source_uid,
+        skill.plan.skill_id,
+        skill.card_index,
+        is_ultimate,
+    ));
     append(
         &mut result,
         drain::run_round_action_with_cost(

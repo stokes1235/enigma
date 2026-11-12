@@ -212,6 +212,12 @@ pub struct ActiveBattle {
     pub(crate) rounds: Vec<CommittedRound>,
     pub(crate) pending_cloth_skill_opers: Vec<UseClothSkillRequest>,
     pub(crate) rouge_snapshot: Option<RougeBattleSnapshot>,
+    /// Speculative entry state: saved together with the fight instance, never
+    /// replayed on reconnect. The old state protects against concurrent edits.
+    pub(crate) rouge_entry: Option<(
+        database::models::game::rouge::RougeRun,
+        database::models::game::rouge::RougeRun,
+    )>,
 }
 
 #[cfg(test)]
@@ -243,6 +249,7 @@ impl Default for ActiveBattle {
             rounds: Vec::new(),
             pending_cloth_skill_opers: Vec::new(),
             rouge_snapshot: None,
+            rouge_entry: None,
         }
     }
 }
@@ -291,7 +298,20 @@ impl ActiveBattle {
             .fight_group
             .as_ref()
             .ok_or(AppError::InvalidRequest)?;
-        let built = crate::logic::battle_setup::dungeon::build_fight(
+        let rouge_entry = if config::configs::get()
+            .episode
+            .get(episode_id)
+            .is_some_and(|episode| episode.chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID)
+        {
+            let before = database::db::game::rouge::get_run(pool, player_id, 1)
+                .await?
+                .ok_or(AppError::InvalidRequest)?;
+            let after = crate::logic::rouge::project_battle_entry(&before)?;
+            Some((before, after))
+        } else {
+            None
+        };
+        let built = crate::logic::battle_setup::dungeon::build_fight_with_rouge_run(
             pool,
             player_id,
             episode_id,
@@ -302,10 +322,13 @@ impl ActiveBattle {
                 use_record,
             },
             request.params.as_deref(),
+            rouge_entry.as_ref().map(|(_, after)| after),
         )
         .await?;
         let seed = initial_battle_seed(pool, player_id, episode_id, use_record).await?;
-        Self::prepare_from_built(request, built, None, None, Some(seed))
+        let mut active = Self::prepare_from_built(request, built, None, None, Some(seed))?;
+        active.rouge_entry = rouge_entry;
+        Ok(active)
     }
 
     pub async fn from_built(
@@ -411,20 +434,7 @@ impl ActiveBattle {
         let checkpoint = self.checkpoint_json()?;
         let entry_cost = serde_json::to_string(costs)?;
         let rouge_entry = if self.chapter_id == crate::rouge::fight::ROUGE_CHAPTER_ID {
-            let before = database::db::game::rouge::get_run(pool, player_id, 1)
-                .await?
-                .ok_or(AppError::InvalidRequest)?;
-            let mut after = before.clone();
-            crate::logic::rouge::flow::apply_map_effects(
-                &mut after,
-                crate::logic::rouge::artifact_rules::MapTrigger::EnterBattle,
-            )?;
-            after.middle_state = crate::logic::rouge::automatic_fight_resource_update(
-                &before,
-                (after.coin - before.coin).max(0),
-                (after.power - before.power).max(0),
-            )?;
-            Some((before, after))
+            Some(self.rouge_entry.as_ref().ok_or(AppError::InvalidRequest)?)
         } else {
             None
         };
@@ -450,6 +460,7 @@ impl ActiveBattle {
         .await?;
         tx.commit().await?;
         self.fight_id = Some(fight_id);
+        self.rouge_entry = None;
         Ok(consumed)
     }
 
@@ -457,11 +468,19 @@ impl ActiveBattle {
         episode_id: i32,
         battle_id: i32,
         request: StartDungeonRequest,
-        built: ::battle::dungeon::BuiltFight,
+        mut built: ::battle::dungeon::BuiltFight,
         tower_context: Option<crate::logic::battle_setup::tower::BattleContext>,
         act229_context: Option<Act229BattleContext>,
         seed: u64,
     ) -> Result<Self, AppError> {
+        if let Some(entry) = built
+            .rouge
+            .as_mut()
+            .and_then(|context| context.entry.as_mut())
+        {
+            // Both initial start and checkpoint replay pass the same seed.
+            entry.seed = seed;
+        }
         let chapter_id = request.chapter_id.unwrap_or_else(|| {
             config::configs::get()
                 .episode
@@ -519,6 +538,7 @@ impl ActiveBattle {
             rounds: Vec::new(),
             pending_cloth_skill_opers: Vec::new(),
             rouge_snapshot,
+            rouge_entry: None,
         })
     }
 

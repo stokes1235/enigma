@@ -34,6 +34,8 @@ pub struct TargetEntity {
     pub model_id: i32,
     pub model_label: i32,
     pub career: i32,
+    /// Server-only runtime lane, applied only to stronger-afflatus damage.
+    pub rouge_stronger_afflatus: i32,
     pub careers: Vec<i32>,
     pub weak_careers: Vec<i32>,
     pub damage_type: EntityDamageType,
@@ -311,6 +313,8 @@ impl TargetPool {
                 entity.current_hp = managers.hp.current(entity.uid);
                 entity.max_hp = managers.hp.max(entity.uid);
                 entity.ex_point = managers.ex_point.get(entity.uid);
+                entity.rouge_stronger_afflatus =
+                    crate::rouge::difficulty::stronger_afflatus_bonus(managers, entity.uid);
                 entity.buffs = managers
                     .buff
                     .active_for(entity.uid)
@@ -356,6 +360,8 @@ impl TargetPool {
                 }
                 entity.max_hp = managers.hp.max(uid);
                 entity.ex_point = managers.ex_point.get(uid);
+                entity.rouge_stronger_afflatus =
+                    crate::rouge::difficulty::stronger_afflatus_bonus(managers, uid);
                 entity.buffs = managers
                     .buff
                     .active_for(uid)
@@ -651,6 +657,7 @@ impl TargetEntity {
             model_id: entity.model_id.unwrap_or_default(),
             model_label: catalog.model_label(entity.model_id.unwrap_or_default()),
             career: entity.career.unwrap_or_default(),
+            rouge_stronger_afflatus: 0,
             careers: catalog.careers(entity.career.unwrap_or_default()),
             weak_careers: entity.weak_careers.clone(),
             damage_type: EntityDamageType::from_wire(

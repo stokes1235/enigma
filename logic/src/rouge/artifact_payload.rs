@@ -48,6 +48,7 @@ pub fn decorate_layouts(run: &RougeRun, bag: &RunBag, layouts: &mut [RougeItemLa
         let Some(item) = bag.items.iter().find(|item| item.uid == uid) else {
             continue;
         };
+        decorate_effects(bag, item, &mut layout.base_effects);
         let attributes = values(run, Some(bag), item);
         // Merge both copies, then mirror the complete union: SlotMO reads the
         // layout field last, while ordinary item updates read the item field.
@@ -67,10 +68,44 @@ fn active(item: &BagItem) -> bool {
     RunBag::is_placed(item) && (0..=3).contains(&item.rotation)
 }
 
+fn decorate_effects(bag: &RunBag, item: &BagItem, effects: &mut Vec<i32>) {
+    use battle::rouge::artefact_entry::{has_entry_effect, medication_skill_id};
+    let medication = medication_skill_id(item.item_id).is_some();
+    if !medication && !has_entry_effect(item.item_id) {
+        return;
+    }
+    // These effect indices come directly from current rouge_desc. Preserve
+    // unrelated server effects, including hidden flags observed in captures.
+    effects.retain(|effect| *effect != 0 && (!medication || *effect != 1));
+    if active(item) {
+        effects.push(0);
+        if medication && super::artifact_rules::count_tag_in_range(item, bag, 104) > 0 {
+            effects.push(1);
+        }
+    }
+    effects.sort_unstable();
+    effects.dedup();
+}
+
 fn values(run: &RougeRun, bag: Option<&RunBag>, item: &BagItem) -> BTreeMap<i32, i64> {
     let tables = config::configs::get();
     let mut result = BTreeMap::new();
     if active(item) {
+        // Placement/inlay replies may contain attributes from the old layout.
+        // Reset only flags explicitly owned by this item's inlay config, so
+        // removing the final Disk cannot leave the old enhancement visible.
+        // Unknown server attributes remain intact during the merge below.
+        if let Some(row) = tables.rouge_item_static_desc.get(item.item_id) {
+            for spec in [&row.item1_attr, &row.item2_attr, &row.item3_attr] {
+                for attribute in spec.split('|') {
+                    if let Some((flag, _)) = attribute.split_once('#')
+                        && let Some(attr) = tables.rouge_attr.iter().find(|row| row.flag == flag)
+                    {
+                        result.insert(attr.id, 0);
+                    }
+                }
+            }
+        }
         for (flag, amount) in super::artifact_rules::inlay_counters(tables, item) {
             if let Some(attr) = tables.rouge_attr.iter().find(|row| row.flag == flag) {
                 result.insert(attr.id, i64::from(amount));
@@ -465,5 +500,56 @@ mod tests {
             BTreeMap::from([(1002, 5), (1004, 3), (1041, 2)])
         );
         assert_eq!(layout.attr, layout.item.as_ref().unwrap().attr);
+    }
+
+    #[test]
+    fn removing_the_final_disk_clears_its_counter_without_erasing_other_attributes() {
+        let mut holder = item(1, 8310405);
+        holder.holes = vec![8140401];
+        holder.hole_ids = vec![2];
+        let (mut run, mut bag) = fixture(vec![holder]);
+        let mut layout = bag_payload(&run, &bag).layouts.remove(0);
+        merge_attributes(&mut layout.attr, BTreeMap::from([(1041, 7)]));
+        bag.items[0].holes.clear();
+        bag.items[0].hole_ids.clear();
+        run.bag = serde_json::to_string(&bag).unwrap();
+        decorate_layouts(&run, &bag, std::slice::from_mut(&mut layout));
+        assert_eq!(
+            attrs(layout.item.as_ref().unwrap()),
+            BTreeMap::from([(1002, 0), (1041, 7)])
+        );
+        assert_eq!(layout.attr, layout.item.as_ref().unwrap().attr);
+    }
+
+    #[test]
+    fn medication_range_activation_is_recomputed_and_other_effects_are_preserved() {
+        let source = item(1, 8150006);
+        let neighbor = (0..8)
+            .flat_map(|row| (0..8).map(move |col| (row, col)))
+            .map(|(row, col)| BagItem {
+                row,
+                col,
+                ..item(2, 8150008)
+            })
+            .find(|other| super::super::artifact_rules::within_range(&source, other))
+            .unwrap();
+        let (mut run, mut bag) = fixture(vec![source, neighbor]);
+        let mut layout = RunBag::to_client_layout(&bag.items[0]);
+        layout.base_effects = vec![42];
+        decorate_layouts(&run, &bag, std::slice::from_mut(&mut layout));
+        assert_eq!(layout.base_effects, vec![0, 1, 42]);
+        bag.items[1].row = -1;
+        bag.items[1].col = -1;
+        run.bag = serde_json::to_string(&bag).unwrap();
+        decorate_layouts(&run, &bag, std::slice::from_mut(&mut layout));
+        assert_eq!(layout.base_effects, vec![0, 42]);
+    }
+
+    #[test]
+    fn placed_disks_activate_only_their_placement_description() {
+        let (run, bag) = fixture(vec![item(1, 8140401), item(2, 8240702)]);
+        let payload = bag_payload(&run, &bag);
+        assert_eq!(payload.layouts[0].base_effects, vec![0]);
+        assert_eq!(payload.layouts[1].base_effects, vec![0]);
     }
 }

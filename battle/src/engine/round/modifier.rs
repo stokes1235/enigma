@@ -33,6 +33,7 @@ pub fn ai_action_bonus(
 ) -> i32 {
     active_buff_action_bonus(managers, 2)
         + action_bonus_for_team(pool, managers, catalog, determinism, context, 2)
+        + crate::rouge::difficulty::enemy_ap_bonus(managers)
 }
 
 pub(crate) fn active_buff_action_bonus(managers: &BattleManagers, team_type: i32) -> i32 {

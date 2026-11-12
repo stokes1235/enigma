@@ -65,20 +65,34 @@ impl BattleRuntime {
             self.managers.rouge.context().is_none(),
             "Rouge context is already configured"
         );
-        let support_roots = context
+        let mut support_roots = context
             .support_skills
             .iter()
             .flat_map(|support| support.skill_ids.iter().copied())
             .collect::<Vec<_>>();
+        support_roots.extend(
+            context
+                .support_ultimates
+                .iter()
+                .map(|mapping| mapping.skill_id),
+        );
+        support_roots.extend(crate::rouge::catalyst::extra_skill_roots(
+            context.catalyst.as_ref(),
+        ));
+        if let Some(entry) = &context.entry {
+            support_roots.extend(crate::rouge::artefact_entry::medication_skill_ids(entry));
+        }
         self.catalog_data
             .expect("battle runtime was not constructed with a catalog")
             .extend_skill_roots(&mut self.catalog, support_roots, std::iter::empty());
+        crate::rouge::catalyst::configure_catalog(&mut self.catalog, context.catalyst.as_ref());
         for support in &context.support_skills {
             self.managers
                 .card
                 .register_skill_group(support.owner_uid, &support.skill_ids);
         }
         crate::rouge::configure(&mut self.managers, context);
+        self.sync_rouge_skill_infos();
     }
 
     pub fn rouge_context(&self) -> Option<&crate::rouge::RougeContext> {
@@ -89,6 +103,9 @@ impl BattleRuntime {
     }
     pub fn rouge_summary(&self) -> Option<crate::rouge::BattleSummary> {
         self.managers.rouge.summary()
+    }
+    pub fn rouge_resources(&self) -> Option<crate::rouge::Resources> {
+        self.managers.rouge.resources()
     }
     /// Plans client auto-battle operations without mutating authoritative state.
     pub fn plan_auto_round(

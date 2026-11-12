@@ -41,6 +41,27 @@ impl GameDB {
             .find(|row| row.difficulty == difficulty)
     }
 
+    /// Exact exported layer-difficulty parameters. These are not a complete
+    /// monster scaling formula: the server-side use of `stepAttr` is missing.
+    pub fn rouge_layer_step_attr(&self, difficulty: i32, layer: i32) -> Option<&str> {
+        self.rouge_layer_difficulty
+            .iter()
+            .find(|row| row.difficulty == difficulty && row.layer == layer)
+            .map(|row| row.step_attr.as_str())
+    }
+
+    /// Hidden initial collections identify cumulative noise rules; they are
+    /// not player-owned bag items. Levels5/10/15 have additional numeric rules
+    /// described by the difficulty row without adding a collection ID.
+    pub fn rouge_difficulty_initial_collections(&self, difficulty: i32) -> Option<Vec<i32>> {
+        self.rouge_difficulty(difficulty)?
+            .init_collections
+            .split('#')
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<i32>().ok().filter(|id| *id > 0))
+            .collect()
+    }
+
     /// Official unlock chain: `preDifficulty == 0` is always available,
     /// otherwise the previous difficulty must have been cleared.
     pub fn rouge_difficulty_unlocked(&self, difficulty: i32, cleared: &[i32]) -> bool {

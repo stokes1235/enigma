@@ -81,6 +81,27 @@ fn record_combat_progress(
     Ok(())
 }
 
+fn commit_battle_resources(
+    run: &mut database::models::game::rouge::RougeRun,
+    active: &ActiveBattle,
+) -> Result<(), AppError> {
+    // Old saved checkpoints did not carry a catalyst snapshot; they remain
+    // replayable without manufacturing resource changes for that old fight.
+    let Some(initial) = active
+        .runtime
+        .rouge_context()
+        .and_then(|context| context.catalyst.as_ref())
+    else {
+        return Ok(());
+    };
+    let result = active
+        .runtime
+        .rouge_resources()
+        .ok_or(AppError::InvalidRequest)?;
+    crate::logic::rouge::apply_battle_resources(run, initial, &result)?;
+    Ok(())
+}
+
 /// Whether an active battle belongs to a rouge run.
 pub fn matches_battle(active: &ActiveBattle) -> bool {
     active.chapter_id == ROUGE_CHAPTER_ID
@@ -260,6 +281,9 @@ pub async fn settle_in_transaction(
         }
         let won = active.runtime.outcome() == battle::BattleOutcome::Victory;
         record_combat_progress(&mut run, active, None, true, won)?;
+        if won {
+            commit_battle_resources(&mut run, active)?;
+        }
         let fight_team = team_info(active);
         let mut team: RougeTeamInfo = serde_json::from_str(&run.team)?;
         for life in fight_team.hero_life_list {
@@ -288,9 +312,9 @@ pub async fn settle_in_transaction(
         } else {
             run.retry_num += 1;
         }
-        sqlx::query("UPDATE user_rouge_run SET terminal_state = ?, retry_num = ?, team = ?, bag = ?, details = ?, coin = ?, power = ?, power_limit = ?, middle_state = ? WHERE user_id = ? AND season = 1 AND terminal_state = 0")
+        sqlx::query("UPDATE user_rouge_run SET terminal_state = ?, retry_num = ?, team = ?, bag = ?, details = ?, coin = ?, power = ?, power_limit = ?, middle_state = ?, spent_coin = ? WHERE user_id = ? AND season = 1 AND terminal_state = 0")
             .bind(run.terminal_state).bind(run.retry_num).bind(&run.team).bind(&run.bag).bind(&run.details)
-            .bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(player_id).execute(&mut **tx).await?;
+            .bind(run.coin).bind(run.power).bind(run.power_limit).bind(&run.middle_state).bind(run.spent_coin).bind(player_id).execute(&mut **tx).await?;
         if won {
             sqlx::query("UPDATE user_rouge_start SET state = 5 WHERE user_id = ? AND season = 1 AND state = 4")
                 .bind(player_id).execute(&mut **tx).await?;
@@ -318,8 +342,16 @@ pub async fn settle_in_transaction(
     let final_node = node.next.is_empty();
     let won = active.runtime.outcome() == battle::BattleOutcome::Victory;
     record_combat_progress(&mut run, active, Some(node.event_id), false, won)?;
-    sqlx::query("UPDATE user_rouge_run SET details = ? WHERE user_id = ? AND season = 1")
+    if won {
+        commit_battle_resources(&mut run, active)?;
+    }
+    sqlx::query("UPDATE user_rouge_run SET details = ?, coin = ?, power = ?, power_limit = ?, middle_state = ?, spent_coin = ? WHERE user_id = ? AND season = 1")
         .bind(&run.details)
+        .bind(run.coin)
+        .bind(run.power)
+        .bind(run.power_limit)
+        .bind(&run.middle_state)
+        .bind(run.spent_coin)
         .bind(player_id)
         .execute(&mut **tx)
         .await?;

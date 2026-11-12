@@ -254,6 +254,10 @@ pub mod arguments {
         !behavior.args.is_empty()
     }
 
+    pub fn exactly_one(behavior: &ParsedBehavior) -> bool {
+        behavior.args.len() == 1
+    }
+
     pub fn exactly_two(behavior: &ParsedBehavior) -> bool {
         behavior.args.len() == 2
     }
@@ -657,6 +661,7 @@ behavior_definitions! {
     [60116] "CardDeckTopRankCorrect" => super::card::Handler, CardDeckTopRankCorrect, Immediate, destination, super::card::supports_deck_top_rank_correct;
     [50034] "ConsumePowerUpgradeSkillCard" => super::card::Handler, ConsumePowerUpgradeSkillCard, Immediate, destination, super::card::supports_power_card_upgrade;
     [60002] "AddUniversalCard" => super::card::Handler, AddUniversalCard, Immediate, destination;
+    [60046] "RougePowerChange" => super::resource::Handler, RougePowerChange, Immediate, once_destination, arguments::exactly_one;
     [60012] "RedealCardKeepStar2" => super::card::Handler, RedealCardKeepStar2, Immediate, destination;
     [60070] "AddUseSkillCard" => super::card::Handler, AddQueuedSkillCard, Immediate, destination, super::card::supports_queued_skill_card;
     [50031] "AddSpTempCard" => super::card::Handler, AddSpTempCard, Immediate, destination, @route(ConditionRouteOverride::Trigger { key: DefinitionKey::new(19106, "HasBuffId"), event: EventKind::RoundStartCard, phase: None }), super::card::supports_temporary_skill_card;

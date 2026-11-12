@@ -11,6 +11,7 @@ pub enum AttackPredicate {
     RankAtLeast(i32),
     Support,
     ExtraAction,
+    NonExtraAction,
     HasBullet,
     NonUltimate,
     Ultimate,
@@ -42,6 +43,7 @@ impl AttackPredicate {
             Self::RankAtLeast(rank) => context.rank >= *rank,
             Self::Support => context.is_support,
             Self::ExtraAction => context.is_extra_action,
+            Self::NonExtraAction => !context.is_extra_action,
             Self::HasBullet => context.has_bullet,
             Self::NonUltimate => !context.is_ultimate,
             Self::Ultimate => context.is_ultimate,
@@ -81,6 +83,35 @@ pub fn attack_modifiers(tables: &config::GameDB, bag: &RunBag) -> Vec<Conditiona
                     },
             ),
             8310108 => (AttackPredicate::Support, 205, 300),
+            // 3.9 Fowling Piece: +60% DMG Bonus while the current actor has
+            // a live Bullet status. Its separate probabilistic extra-action
+            // effect is intentionally not represented by this rule.
+            8210711 => (AttackPredicate::HasBullet, 205, 600),
+            8210712 => {
+                // The damage engine treats Incantation and Ultimate Might as
+                // distinct attributes. Explicit predicates keep ordinary
+                // extra actions from impersonating a played incantation.
+                result.push(ConditionalModifier {
+                    source_uid: item.uid,
+                    item_id: item.item_id,
+                    predicate: AttackPredicate::All(vec![
+                        AttackPredicate::HasBullet,
+                        AttackPredicate::Ultimate,
+                    ]),
+                    attr_id: 211,
+                    value: 500,
+                });
+                (
+                    AttackPredicate::All(vec![
+                        AttackPredicate::HasBullet,
+                        AttackPredicate::NonUltimate,
+                        AttackPredicate::NonExtraAction,
+                        AttackPredicate::RankAtLeast(1),
+                    ]),
+                    214,
+                    500,
+                )
+            }
             8310706 => (
                 AttackPredicate::ExtraAction,
                 205,
@@ -97,6 +128,74 @@ pub fn attack_modifiers(tables: &config::GameDB, bag: &RunBag) -> Vec<Conditiona
         });
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rouge::bag::BagItem;
+
+    fn placed(uid: i64, item_id: i32) -> BagItem {
+        BagItem {
+            uid,
+            item_id,
+            row: uid as i32,
+            col: 0,
+            rotation: 0,
+            holes: vec![],
+            hole_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn bullet_weapons_apply_to_the_current_cast_without_leaking_into_extra_actions() {
+        crate::rouge::original_tests::init_config();
+        let tables = config::configs::get();
+        let bag = RunBag {
+            rows: 8,
+            cols: 8,
+            uid_counter: 2,
+            items: vec![placed(1, 8210711), placed(2, 8210712)],
+        };
+        let context = AttackContext {
+            rank: 2,
+            has_bullet: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate_attack(tables, &bag, &context),
+            BTreeMap::from([(205, 600), (214, 500)])
+        );
+        let ultimate = AttackContext {
+            rank: 4,
+            is_ultimate: true,
+            ..context
+        };
+        assert_eq!(
+            evaluate_attack(tables, &bag, &ultimate),
+            BTreeMap::from([(205, 600), (211, 500)])
+        );
+        let extra = AttackContext {
+            is_extra_action: true,
+            ..context
+        };
+        assert_eq!(
+            evaluate_attack(tables, &bag, &extra),
+            BTreeMap::from([(205, 600)])
+        );
+        let without = AttackContext {
+            has_bullet: false,
+            ..context
+        };
+        assert!(evaluate_attack(tables, &bag, &without).is_empty());
+        let mut stored = bag.clone();
+        stored.items[0].row = -1;
+        stored.items[0].col = -1;
+        assert_eq!(
+            evaluate_attack(tables, &stored, &context),
+            BTreeMap::from([(214, 500)])
+        );
+    }
 }
 
 /// Pure reference evaluator. The battle crate may translate these predicates

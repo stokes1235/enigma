@@ -10,6 +10,7 @@ pub mod bag;
 mod bonuses_integration;
 mod collection_shapes;
 pub mod combat;
+pub mod difficulty;
 pub mod ending_rules;
 mod entrust_effects;
 #[cfg(test)]
@@ -2811,6 +2812,70 @@ pub fn automatic_fight_resource_update(
     gained_power: i32,
 ) -> Result<String, AppError> {
     automatic_fight_outcome_update(run, gained_coin, gained_power, 0)
+}
+
+/// Project the same entry effects that will be saved when the fight is
+/// activated. The combat snapshot and the optimistic database update must be
+/// built from this one projection, including consumed or granted artefacts.
+pub fn project_battle_entry(before: &RougeRun) -> Result<RougeRun, AppError> {
+    let mut after = before.clone();
+    flow::apply_map_effects(&mut after, artifact_rules::MapTrigger::EnterBattle)?;
+    after.middle_state = automatic_fight_resource_update(
+        before,
+        (after.coin - before.coin).max(0),
+        (after.power - before.power).max(0),
+    )?;
+    Ok(after)
+}
+
+/// Commit the authoritative in-fight catalyst balance on victory. A failure
+/// deliberately leaves the entry snapshot intact for retry. Gross spending is
+/// kept separately from the final balance so recoveries still count correctly.
+pub fn apply_battle_resources(
+    run: &mut RougeRun,
+    initial: &battle::rouge::Catalyst,
+    result: &battle::rouge::Resources,
+) -> Result<(), AppError> {
+    if run.coin != initial.coin
+        || run.power != initial.power
+        || run.power_limit != initial.power_limit
+        || result.coin < 0
+        || result.power < 0
+        || result.power_limit < 0
+        || result.power > result.power_limit
+        || result.spent_coin < 0
+        || result.spent_power < 0
+    {
+        return Err(AppError::InvalidRequest);
+    }
+    let gain = |end: i32, start: i32, spent: i32| -> Result<i32, AppError> {
+        i32::try_from(i64::from(end) - i64::from(start) + i64::from(spent))
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or(AppError::InvalidRequest)
+    };
+    let gained_coin = gain(result.coin, initial.coin, result.spent_coin)?;
+    let gained_power = gain(result.power, initial.power, result.spent_power)?;
+    let middle_state = updated_entrust(
+        run,
+        EntrustChange {
+            gained_coin,
+            spent_coin: result.spent_coin,
+            gained_power,
+            spent_power: result.spent_power,
+            ..Default::default()
+        },
+    )?;
+    let mut detail = flow::details(run);
+    detail.consume_power = detail.consume_power.saturating_add(result.spent_power);
+    let details = serde_json::to_string(&detail)?;
+    run.coin = result.coin;
+    run.power = result.power;
+    run.power_limit = result.power_limit;
+    run.spent_coin = run.spent_coin.saturating_add(result.spent_coin);
+    run.middle_state = middle_state;
+    run.details = details;
+    Ok(())
 }
 
 pub fn automatic_fight_outcome_update(

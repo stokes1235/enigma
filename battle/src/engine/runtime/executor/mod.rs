@@ -707,6 +707,31 @@ pub(crate) fn execute_rule_op_with(
             }
             Ok(RuleOutcome::Eureka(changes))
         }
+        RuleOp::Command(BattleCommand::RougePowerChange(delta)) => {
+            let markers = crate::rouge::catalyst::power_change(managers, delta);
+            let Some(RuleOp::EffectMarker {
+                target_uid,
+                effect_type,
+                effect_num,
+                config_effect,
+                reserve_id,
+                reserve_str,
+            }) = markers.into_iter().next()
+            else {
+                return Ok(RuleOutcome::StateChanged);
+            };
+            Ok(RuleOutcome::EffectMarker(
+                crate::engine::skill::rule::output::EffectMarker {
+                    target_uid,
+                    effect_type,
+                    effect_num,
+                    effect_num1: None,
+                    config_effect,
+                    reserve_id,
+                    reserve_str,
+                },
+            ))
+        }
         RuleOp::Command(BattleCommand::Gauge(command)) => {
             let change = managers.execute_gauge(command)?;
             for event in change.events() {
