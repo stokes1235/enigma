@@ -252,7 +252,7 @@ fn own_cards(
     pool: &TargetPool,
     owner: i64,
     rank: i32,
-    master_card: bool,
+    kind: TemporaryCardKind,
 ) -> Option<Vec<RuleOp>> {
     let entity = pool.entity(owner)?;
     [&entity.skill_group1, &entity.skill_group2]
@@ -266,14 +266,10 @@ fn own_cards(
                     origin: origin(60032, "AddSkillCard"),
                     target_uid: owner,
                     skill_id: skill,
-                    hero_id: master_card.then_some(entity.model_id),
+                    hero_id: matches!(kind, TemporaryCardKind::CatalystMasterSkill | TemporaryCardKind::CatalystSyntonySkill).then_some(entity.model_id),
                     reserve_id: i64::from(entity.model_id),
                     team_type: 1,
-                    kind: if master_card {
-                        TemporaryCardKind::CatalystMasterSkill
-                    } else {
-                        TemporaryCardKind::HeroSkill
-                    },
+                    kind,
                 }),
             )))
         })
@@ -416,7 +412,13 @@ pub(crate) fn plan(
                 pool,
                 target,
                 if skill_id == 800030002 { 3 } else { 1 },
-                skill_id == 800030002,
+                // The syntony catalyst's two basics are likewise captured as
+                // MASTERADDHANDCARD (197), ordinary type 0 temporary cards.
+                match skill_id {
+                    800030002 => TemporaryCardKind::CatalystMasterSkill,
+                    800040001 => TemporaryCardKind::CatalystSyntonySkill,
+                    _ => TemporaryCardKind::HeroSkill,
+                },
             )
         }
         800040002 | 800050002 => {
@@ -430,7 +432,10 @@ pub(crate) fn plan(
                 (&mut state.resonance_boost, 90351)
             };
             *boost = boost.saturating_add(1);
-            Some(vec![super::grant(0, 0, buff)])
+            // 800040002 is captured with both the carrier and its level UI
+            // update. The analogous resonance marker is a local inference.
+            let effect_type = if skill_id == 800040002 { 177 } else { 181 };
+            Some(vec![super::grant(0, 0, buff), marker(effect_type, 1)])
         }
         800060001 => Some(
             pool.defender_all

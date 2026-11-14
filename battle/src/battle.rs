@@ -20,12 +20,15 @@ impl Battle {
     /// Builds and starts a configured fight with deterministic round state.
     pub fn start(catalog: BattleCatalog, built: BuiltFight, seed: u64) -> Result<Self, String> {
         let BuiltFight {
-            fight,
+            mut fight,
             ex_attributes,
             sp_attributes,
             rouge,
             battle_rule_skills,
         } = built;
+        if let Some(context) = &rouge {
+            crate::rouge::prepare_storm_contracts(catalog, &mut fight, context);
+        }
         let mut runtime =
             BattleRuntime::new_with_attributes(catalog, fight, ex_attributes, sp_attributes);
         runtime.extend_battle_rule_skills(battle_rule_skills);

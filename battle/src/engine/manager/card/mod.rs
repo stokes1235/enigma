@@ -71,6 +71,10 @@ pub struct CardManager {
 struct HeroPrecastProvenance {
     hand_ids: HashSet<CardInstanceId>,
     played_indices: HashSet<i32>,
+    // Preserve the preexisting auto-play AP policy for syntony-catalyst
+    // basics until an isolated recording establishes their true cost.
+    syntony_hand_ids: HashSet<CardInstanceId>,
+    syntony_played_indices: HashSet<i32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -356,7 +360,9 @@ impl CardManager {
         self.played.clear();
         if let Some(state) = self.hero_precast.as_mut() {
             state.played_indices.clear();
+            state.syntony_played_indices.clear();
             state.hand_ids.retain(|id| self.deck.contains_hand_id(*id));
+            state.syntony_hand_ids.retain(|id| self.deck.contains_hand_id(*id));
         }
         self.refilled.clear();
         self.queued_use_cards.clear();
@@ -485,15 +491,19 @@ impl CardManager {
             .iter()
             .position(|played| played.card_index == card_index)?;
         let card = self.played.remove(index).card;
-        let hero_precast = self
+        let (hero_precast, syntony_precast) = self
             .hero_precast
             .as_mut()
-            .is_some_and(|state| state.played_indices.remove(&card_index));
+            .map(|state| (state.played_indices.remove(&card_index), state.syntony_played_indices.remove(&card_index)))
+            .unwrap_or_default();
         if restore {
             let index = self.deck.hand().len();
             self.deck.add_to_hand(card.clone());
             if hero_precast {
                 self.mark_hero_precast(index);
+                if syntony_precast {
+                    self.mark_syntony_precast(index);
+                }
             }
         }
         Some(card)
@@ -504,6 +514,14 @@ impl CardManager {
             self.hero_precast
                 .as_ref()
                 .is_some_and(|state| state.hand_ids.contains(&id))
+        })
+    }
+
+    pub(crate) fn is_paid_hero_precast_hand(&self, hand_index: usize) -> bool {
+        self.deck.hand_id(hand_index).is_some_and(|id| {
+            self.hero_precast.as_ref().is_some_and(|state| {
+                state.hand_ids.contains(&id) && !state.syntony_hand_ids.contains(&id)
+            })
         })
     }
 
@@ -519,6 +537,12 @@ impl CardManager {
                 .get_or_insert_with(Default::default)
                 .hand_ids
                 .insert(id);
+        }
+    }
+
+    fn mark_syntony_precast(&mut self, hand_index: usize) {
+        if let Some(id) = self.deck.hand_id(hand_index) {
+            self.hero_precast.get_or_insert_with(Default::default).syntony_hand_ids.insert(id);
         }
     }
 
@@ -1193,6 +1217,11 @@ impl CardManager {
                 .filter(|id| self.deck.contains_hand_id(*id))
                 .collect::<Vec<_>>()
         });
+        let syntony_precast_ids = self.hero_precast.as_ref().map(|state| {
+            state.syntony_hand_ids.iter().copied()
+                .filter(|id| self.deck.contains_hand_id(*id))
+                .collect::<Vec<_>>()
+        });
         let recorded_skill = recorded_skill.filter(|recorded| {
             self.deck.hand().iter().any(|card| {
                 card.uid == Some(recorded.source_uid) && card.skill_id == Some(recorded.skill_id)
@@ -1252,7 +1281,14 @@ impl CardManager {
             {
                 state.played_indices.insert(action_index);
             }
+            if syntony_precast_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| !self.deck.contains_hand_id(*id)))
+            {
+                state.syntony_played_indices.insert(action_index);
+            }
             state.hand_ids.retain(|id| self.deck.contains_hand_id(*id));
+            state.syntony_hand_ids.retain(|id| self.deck.contains_hand_id(*id));
         }
 
         let played = PlayedCard {

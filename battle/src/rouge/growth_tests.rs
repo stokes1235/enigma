@@ -16,6 +16,9 @@ use crate::engine::{
 };
 use sonettobuf::{CardInfo, Fight, FightEntityInfo, FightTeam, HeroAttribute};
 
+#[path = "growth_queue_tests.rs"]
+mod queue_tests;
+
 struct Harness {
     managers: BattleManagers,
     pool: TargetPool,

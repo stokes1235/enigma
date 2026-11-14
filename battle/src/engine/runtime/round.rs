@@ -513,7 +513,19 @@ impl BattleRuntime {
         // Round bonuses protect allies through the defender's actions, then
         // expire before wave entry and the following round's effects. Growth
         // and the battle summary survive this reset.
-        crate::rouge::end_incantation_round(&mut self.managers);
+        let incantation_reset = crate::rouge::end_incantation_round(&mut self.managers);
+        if !incantation_reset.is_empty() && !battle_ended(&self.fight, &pool, &self.managers) {
+            let reset = drain::run_command_group(
+                &mut self.managers,
+                &pool,
+                catalog,
+                &mut self.determinism,
+                settlement_context,
+                incantation_reset,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            fight_steps.extend(project_result(reset, fight_version, absorb_hurt_map_layout)?);
+        }
         let mut wave_entering_uids = Vec::new();
         if let Some(transition) = advance_wave_transition(
             &mut self.fight,

@@ -327,6 +327,9 @@ fn enchant_hand_ops(
     context: BehaviorOpContext<'_>,
     behavior: &ParsedBehavior,
 ) -> Option<Vec<RuleOp>> {
+    if !supports_enchant_hand(behavior) {
+        return None;
+    }
     let [enchant_id, duration, mode, count] = behavior.args.as_slice() else {
         return None;
     };
@@ -373,18 +376,21 @@ fn enchant_hand_ops(
     } else {
         return None;
     };
-    (!indices.is_empty()).then(|| {
-        vec![RuleOp::Command(BattleCommand::Card(
-            CardCommand::EnchantHand(CardEnchantHand {
-                origin: super::command_origin(behavior)
-                    .expect("registered card enchant has an origin"),
-                indices,
-                enchant,
-                duration: *duration,
-                team_type: 1,
-            }),
-        ))]
-    })
+    if indices.is_empty() {
+        // The rule is implemented even when the current hand has no eligible
+        // cards. Returning None would incorrectly report a missing behavior.
+        return Some(Vec::new());
+    }
+    Some(vec![RuleOp::Command(BattleCommand::Card(
+        CardCommand::EnchantHand(CardEnchantHand {
+            origin: super::command_origin(behavior)
+                .expect("registered card enchant has an origin"),
+            indices,
+            enchant,
+            duration: *duration,
+            team_type: 1,
+        }),
+    ))])
 }
 
 fn mark_hand_temporary_ops(
@@ -737,7 +743,26 @@ mod tests {
                 &behavior,
             );
             if expected.is_empty() {
-                assert!(ops.is_none());
+                assert!(matches!(ops.as_deref(), Some([])));
+                let random_behavior =
+                    ParsedBehavior::new(60041, "Enchant", vec![10003, -1, 3, 2]);
+                let random_ops = Handler::emit_ops(
+                    BehaviorOpContext {
+                        source_uid: 0,
+                        source_team: 1,
+                        target_uid: 0,
+                        active_skill_id: 8018104,
+                        transfer_count: 1,
+                        event: None,
+                        managers: &managers,
+                        pool: &pool,
+                        determinism: &mut determinism,
+                        modifiers: &mut modifiers,
+                        target: &mut target,
+                    },
+                    &random_behavior,
+                );
+                assert!(matches!(random_ops.as_deref(), Some([])));
             } else {
                 let Some([RuleOp::Command(BattleCommand::Card(CardCommand::EnchantHand(
                     command,

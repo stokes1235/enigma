@@ -421,7 +421,7 @@ fn battle_start_keeps_normal_opening_and_adds_all_twelve_real_medication_cards_a
             .collect();
         assert_eq!(cards.len(), 2, "item {item_id}");
         assert!(cards.iter().all(|card| card.uid == Some(0)
-            && card.card_type == Some(CardType::RougeSp as i32)
+            && card.card_type == Some(0)
             && card.temp_card == Some(false)
             && card.hero_id == Some(0)));
     }

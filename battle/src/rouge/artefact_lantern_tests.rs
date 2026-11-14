@@ -94,6 +94,9 @@ fn lantern_blocks_the_four_configured_status_families_on_deployed_allies() {
     run(&mut managers, &pool, &catalog, &mut rng, ops);
     for uid in [10, 11] {
         assert!(managers.buff.has_buff_id(uid, 832051401));
+        let carrier_uid = managers.buff.buff_id_uid(uid, 832051401).unwrap();
+        let carrier = managers.buff.snapshot(uid, carrier_uid).unwrap();
+        assert_eq!(carrier.from_uid, Some(0), "the field is the buff source");
     }
     for uid in [12, 13, -1] {
         assert!(!managers.buff.has_buff_id(uid, 832051401));

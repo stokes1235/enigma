@@ -147,15 +147,15 @@ fn apply_run_progression(profile: &mut Profile, run: &RougeRun) {
 }
 
 /// Temporary balancing policy, independent of the exported `stepAttr` rows:
-/// HP gains 2.5% per difficulty above 1 plus 1% per resolved node, while ATK
-/// gains 0.5% per node. Cap the counted nodes at 30 and HP growth at 100%.
+/// HP gains 2.5% per difficulty above 1 plus 1% per resolved node. Cap the
+/// counted nodes at 30 and HP growth at 100%. The formerly assumed ATK growth
+/// per node is omitted: captured difficulty-6 battles do not show it.
 /// The run's archived steps and current-layer resolved nodes share the same
 /// accounting as the result screen, and are frozen when the fight is built.
 fn apply_local_progression(profile: &mut Profile, completed_steps: i32) {
     const MAX_STEPS: i32 = 30;
     const HP_PER_DIFFICULTY: i32 = 25;
     const HP_PER_STEP: i32 = 10;
-    const ATTACK_PER_STEP: i32 = 5;
     const MAX_HP_BONUS: i32 = 1000;
     let steps = completed_steps.clamp(0, MAX_STEPS);
     let hp = (profile.difficulty.saturating_sub(1).clamp(0, 19) * HP_PER_DIFFICULTY
@@ -163,9 +163,6 @@ fn apply_local_progression(profile: &mut Profile, completed_steps: i32) {
         .min(MAX_HP_BONUS);
     if hp > 0 {
         *profile.enemy_attributes.entry(101).or_default() += hp;
-    }
-    if steps > 0 {
-        *profile.enemy_attributes.entry(102).or_default() += steps * ATTACK_PER_STEP;
     }
 }
 

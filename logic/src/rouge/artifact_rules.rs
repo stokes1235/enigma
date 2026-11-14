@@ -542,14 +542,14 @@ pub fn evaluate_battle_with_state(
             | 8210314 | 8310315 => {}
             8330615 => result.unsupported.push(unsupported(
                 item,
-                "acquisition coins supported; storm region substitution needs combat support",
+                "acquisition coins and configured storm substitution supported; layout-specific capture is pending",
             )),
             // Held-Bullet and probabilistic extra-action bonuses are both
             // applied by the battle engine to the current execution only.
             8210711 => {},
             8330710 => result.unsupported.push(unsupported(
                 item,
-                "round-start Schemed supported; storm region replacement is pending",
+                "round-start Schemed and configured storm replacement supported; layout-specific capture is pending",
             )),
             // The combat runtime grants the verified anticipation states and
             // generates own/support cards at their next real trigger.

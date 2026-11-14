@@ -30,6 +30,8 @@ pub enum TemporaryCardKind {
     HeroSkill,
     /// 3.9 Rouge catalyst adds an owner-attributed temporary normal card.
     CatalystMasterSkill,
+    /// Same captured card and packet shape, but distinct unverified AP cost.
+    CatalystSyntonySkill,
     SupportSkill,
 }
 
@@ -783,7 +785,7 @@ pub(super) fn execute(
                 TemporaryCardKind::SupportSkill => {
                     manager.add_support_card_for(add.target_uid, add.skill_id, add.hero_id.unwrap())
                 }
-                TemporaryCardKind::CatalystMasterSkill => {
+                TemporaryCardKind::CatalystMasterSkill | TemporaryCardKind::CatalystSyntonySkill => {
                     let hero_id = add
                         .hero_id
                         .filter(|id| *id > 0)
@@ -811,10 +813,13 @@ pub(super) fn execute(
             };
             if matches!(
                 add.kind,
-                TemporaryCardKind::HeroSkill | TemporaryCardKind::CatalystMasterSkill
+                TemporaryCardKind::HeroSkill | TemporaryCardKind::CatalystMasterSkill | TemporaryCardKind::CatalystSyntonySkill
             ) && matches!(add.origin.key.opcode, 739 | 60032)
             {
                 manager.mark_hero_precast(hand_index);
+                if add.kind == TemporaryCardKind::CatalystSyntonySkill {
+                    manager.mark_syntony_precast(hand_index);
+                }
             }
             operation = Some(CardChange::SpCardAdd {
                 target_uid: add.target_uid,
@@ -829,7 +834,7 @@ pub(super) fn execute(
                     TemporaryCardKind::ConfiguredSkill => CardChangeKind::TemporaryAdded,
                     TemporaryCardKind::ConfiguredSkill3 => CardChangeKind::ConfiguredSkill3Added,
                     TemporaryCardKind::HeroSkill => CardChangeKind::HeroTemporaryAdded,
-                    TemporaryCardKind::CatalystMasterSkill => CardChangeKind::CatalystMasterAdded,
+                    TemporaryCardKind::CatalystMasterSkill | TemporaryCardKind::CatalystSyntonySkill => CardChangeKind::CatalystMasterAdded,
                     TemporaryCardKind::SupportSkill => CardChangeKind::HeroTemporaryAdded,
                 },
                 Some(card),

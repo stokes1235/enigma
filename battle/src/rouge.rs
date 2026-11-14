@@ -40,10 +40,13 @@ mod artefact_ending;
 mod artefact_events;
 mod artefact_opening_hand;
 mod artefact_ritual;
+mod artefact_storm;
+pub(crate) use artefact_storm::prepare as prepare_storm_contracts;
 mod artefact_turns;
 pub mod difficulty;
 pub use difficulty::Difficulty;
 pub(crate) use growth::end_round as end_incantation_round;
+pub(crate) use growth::settle_queue as settle_incantation_queue;
 pub(crate) use statistics::record_hp;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +470,8 @@ struct IncantationState {
     casts_by_type: BTreeMap<i32, i32>,
     levels: BTreeMap<i32, i32>,
     resonance_level: i32,
+    /// A real committed action queue has already settled this round.
+    queue_settled: bool,
     /// Exact deltas owned by this round, so permanent growth is not removed.
     attributes: BTreeMap<(i64, i32), i32>,
 }
@@ -608,6 +613,7 @@ pub(crate) fn opening(managers: &mut BattleManagers, pool: &TargetPool) -> Vec<R
     // Shipped Saliva Bottle skill 91220070 uses 5042 at entry and 5041 on
     // casts. Entry's two ticks include the opening duration settlement.
     let mut ops = artefact_opening_hand::opening(managers, pool);
+    ops.extend(artefact_storm::opening_marker(managers));
     if bottle && let Some(uid) = first_ally(managers, pool) {
         ops.push(grant(uid, uid, 5042));
     }
@@ -618,7 +624,9 @@ pub(crate) fn opening(managers: &mut BattleManagers, pool: &TargetPool) -> Vec<R
         // entry policy and remains an inference for reserve/revival cases.
         for entity in &pool.attacker_main {
             if managers.hp.current(entity.uid) > 0 {
-                ops.push(grant(entity.uid, entity.uid, 832051401));
+                // In the difficulty-6 capture, this carrier is granted by
+                // the field (source UID 0), not by each receiving actor.
+                ops.push(grant(0, entity.uid, 832051401));
             }
         }
     }

@@ -325,7 +325,7 @@ fn apply_prefix(
                     skill_id,
                     managers,
                     catalog,
-                    cards.is_hero_precast_hand(card_index),
+                    cards.is_paid_hero_precast_hand(card_index),
                 );
                 let play = CardPlay {
                     origin: CARD_PLAY_ORIGIN,
@@ -397,7 +397,7 @@ fn best_candidate(
                 skill_id,
                 managers,
                 catalog,
-                cards.is_hero_precast_hand(card_index),
+                cards.is_paid_hero_precast_hand(card_index),
             );
             if normal_ap_cost > normal_ap {
                 return None;
@@ -591,8 +591,10 @@ fn is_shield_buff(buff_id: i32, managers: &BattleManagers) -> bool {
 fn card_identity(card: &CardInfo, chosen_skill_id: Option<i32>) -> Option<(i64, i32)> {
     let source_uid = card.uid?;
     let skill_id = chosen_skill_id.or(card.skill_id)?;
-    let scene_rouge_card =
-        source_uid == 0 && card.card_type == Some(sonettobuf::card_info::CardType::RougeSp as i32);
+    let scene_rouge_card = source_uid == 0
+        && (card.card_type == Some(sonettobuf::card_info::CardType::RougeSp as i32)
+            || (crate::rouge::artefact_entry::is_medication_card(card)
+                && card.skill_id == Some(skill_id)));
     (skill_id > 0 && (source_uid != 0 || scene_rouge_card)).then_some((source_uid, skill_id))
 }
 
@@ -636,11 +638,38 @@ mod rouge_scene_card_tests {
             skill_id: Some(815000611),
             ..Default::default()
         };
+        assert_eq!(card_identity(&card, None), Some((0, 815000611)));
+        assert_eq!(card_identity(&card, Some(30030111)), None);
+        card.skill_id = Some(30030111);
         assert_eq!(card_identity(&card, None), None);
+        card.skill_id = Some(815000611);
         card.card_type = Some(sonettobuf::card_info::CardType::RougeSp as i32);
         assert_eq!(card_identity(&card, None), Some((0, 815000611)));
         card.skill_id = Some(0);
         assert_eq!(card_identity(&card, None), None);
+    }
+
+    #[test]
+    fn syntony_precast_keeps_its_separate_auto_ap_policy_when_moved() {
+        use crate::engine::{manager::card::{CardAddTemporary, TemporaryCardKind}, skill::rule::{CommandOrigin, DefinitionKey, RuleDomain}};
+        crate::test_support::init_config();
+        let mut managers = BattleManagers::seeded(&Fight::default());
+        crate::rouge::configure(&mut managers, crate::rouge::RougeContext::default());
+        let mut cards = CardManager::new(vec![CardInfo { uid: Some(11), skill_id: Some(30030111), ..Default::default() }]);
+        cards.execute_command(CardCommand::AddTemporary(CardAddTemporary {
+            origin: CommandOrigin { domain: RuleDomain::Behavior, key: DefinitionKey::new(60032, "AddSkillCard") },
+            target_uid: 10,
+            skill_id: 30030111,
+            hero_id: Some(3003),
+            reserve_id: 3003,
+            team_type: 1,
+            kind: TemporaryCardKind::CatalystSyntonySkill,
+        })).unwrap();
+        assert!(cards.move_card(1, 0));
+        assert!(cards.is_hero_precast_hand(0));
+        assert!(!cards.is_paid_hero_precast_hand(0));
+        assert_eq!(action_point_cost(&cards.hand()[0], 10, 30030111, &managers, &SkillEffectCatalog::default(), cards.is_paid_hero_precast_hand(0)), 0);
+        assert!(!cards.is_hero_precast_hand(1));
     }
 }
 

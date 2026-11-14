@@ -213,6 +213,137 @@ pub(super) fn completed_action(
             }
         }
     }
+    // Real player turns settle the complete submitted queue before any card
+    // acts. Keep the standalone direct-cast path for callers without a queue.
+    if managers
+        .rouge
+        .active
+        .as_ref()
+        .is_some_and(|state| state.incantation.queue_settled)
+    {
+        return ops;
+    }
+    if !selected || ultimate || extra {
+        return ops;
+    }
+    let kind = normalized_category(managers.catalog().skill_effect_tag(action.skill_id));
+    if !matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9) {
+        return ops;
+    }
+    if let Some(state) = managers.rouge.active.as_mut() {
+        let count = state.incantation.casts_by_type.entry(kind).or_default();
+        *count = count.saturating_add(1);
+    }
+    ops.extend(settle_kind(managers, pool, action.source_uid, kind, determinism));
+    ops
+}
+
+fn normalized_category(tag: i32) -> i32 {
+    match tag {
+        1 | 2 => 1,
+        tag => tag,
+    }
+}
+
+/// Settle the physical cards accepted into the player action queue. Captured
+/// level packets precede its first action: normal, support, ultimate and the
+/// medicine cards with actor UID 0 all contribute. Card type 7 is only the
+/// device placeholder and is excluded. A generic skill3 basic is excluded
+/// unless it is an actual hero precast (other such cases remain inferred).
+/// Invalid cards dissolved before commitment do not enter `played`; a card
+/// committed here still counts if its actor later dies or its target vanishes.
+pub(crate) fn settle_queue(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
+) -> Vec<RuleOp> {
+    let Some(active) = managers.rouge.active.as_ref() else {
+        return Vec::new();
+    };
+    if active.context.incantation_rules.is_none() || active.incantation.queue_settled {
+        return Vec::new();
+    }
+    let mut counts = BTreeMap::<i32, (i32, i64)>::new();
+    for played in managers.card.played() {
+        let card_type = played.card.card_type.unwrap_or_default();
+        if card_type == 7
+            || (card_type == 6
+                && !managers.catalog().skill_is_big(played.skill_id)
+                && !managers.card.is_hero_precast_play(played.card_index))
+        {
+            continue;
+        }
+        let kind = normalized_category(managers.catalog().skill_effect_tag(played.skill_id));
+        // The captured tag 14 (device-themed character card, not type 7)
+        // contributes a distinct category to resonance. Its own polarization
+        // table is not shipped; unknown tags are not invented.
+        if !matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9 | 14) {
+            continue;
+        }
+        let entry = counts.entry(kind).or_insert((0, played.caster_uid));
+        entry.0 = entry.0.saturating_add(1);
+    }
+    {
+        let state = managers.rouge.active.as_mut().unwrap();
+        state.incantation.queue_settled = true;
+        for (&kind, &(count, _)) in &counts {
+            let value = state.incantation.casts_by_type.entry(kind).or_default();
+            *value = value.saturating_add(count);
+        }
+    }
+    // No captured queue has category 14 as the unique maximum. Conservatively
+    // let it compete for the maximum instead of promoting a smaller group;
+    // its own unsupported polarization remains unknown.
+    let maximum = counts.values().map(|(count, _)| *count).max().unwrap_or_default();
+    let mut candidates = counts
+        .iter()
+        .filter(|(_, (count, _))| *count == maximum && maximum >= 3)
+        .map(|(&kind, &(_, uid))| (kind, uid))
+        .collect::<Vec<_>>();
+    if candidates.is_empty()
+        && let Some((&kind, &(_, uid))) = counts.first_key_value()
+    {
+        candidates.push((kind, uid));
+    }
+    let mut markers = Vec::new();
+    let mut effects = Vec::new();
+    for (kind, source_uid) in candidates {
+        for op in settle_kind(managers, pool, source_uid, kind, determinism) {
+            if matches!(&op, RuleOp::EffectMarker { effect_type: 183 | 184, .. }) {
+                markers.push(op);
+            } else {
+                effects.push(op);
+            }
+        }
+    }
+    // The client receives one final level for each tied maximal category,
+    // followed by one resonance level, before the corresponding artefacts.
+    markers.sort_by_key(|op| match op {
+        RuleOp::EffectMarker { effect_type, config_effect, .. } => (*effect_type, *config_effect),
+        _ => unreachable!(),
+    });
+    markers.extend(effects);
+    markers
+}
+
+fn settle_kind(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    source_uid: i64,
+    kind: i32,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
+) -> Vec<RuleOp> {
+    let Some(context) = managers.rouge.context().cloned() else {
+        return Vec::new();
+    };
+    let sources = context
+        .growth_sources
+        .iter()
+        .filter(|source| context.artefacts.iter().any(|item| item.uid == source.uid && item.item_id == source.item_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let items = context.artefacts.clone();
+    let mut ops = Vec::new();
     let Some(rules) = managers
         .rouge
         .context()
@@ -220,19 +351,6 @@ pub(super) fn completed_action(
     else {
         return ops;
     };
-    if !selected || ultimate || extra {
-        return ops;
-    }
-    // Reality/Mental are both the Attack card type. `skill_type` is the
-    // active/passive discriminator and is not the syntony category.
-    let kind = match managers.catalog().skill_effect_tag(action.skill_id) {
-        1 | 2 => 1,
-        tag => tag,
-    };
-    // These seven types are the shipped base polarization table's keys.
-    if !matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9) {
-        return ops;
-    }
     let mut bonuses = super::catalyst::level_bonus(managers);
     bonuses.0 = bonuses.0.saturating_add(
         managers
@@ -248,10 +366,9 @@ pub(super) fn completed_action(
         .map_or(0, |catalyst| catalyst.style_id);
     let state = managers.rouge.active.as_mut().unwrap();
     let incantation = &mut state.incantation;
-    let count = incantation.casts_by_type.entry(kind).or_default();
-    *count = count.saturating_add(1);
-    let new_syntony = if *count >= 3 {
-        (*count - 2)
+    let count = incantation.casts_by_type.get(&kind).copied().unwrap_or_default();
+    let new_syntony = if count >= 3 && matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9) {
+        (count - 2)
             .saturating_add(bonuses.0)
             .min(rules.syntony_level_limit.clamp(1, 7))
     } else {
@@ -274,10 +391,8 @@ pub(super) fn completed_action(
     incantation.resonance_level = new_resonance;
     state.summary.resonance_max_level = state.summary.resonance_max_level.max(new_resonance);
 
-    let target = pool
-        .attacker_main
-        .first()
-        .map_or(action.source_uid, |entity| entity.uid);
+    // Both level packets address the team marker (UID 0), as in the capture.
+    let target = 0;
     if new_syntony > old_syntony {
         ops.push(level_marker(target, 183, new_syntony, kind));
         for source in sources
@@ -338,7 +453,7 @@ pub(super) fn completed_action(
             {
                 for entity in &pool.attacker_main {
                     if managers.hp.current(entity.uid) > 0 {
-                        ops.push(grant_stacks(action.source_uid, entity.uid, 90001, amount));
+                        ops.push(grant_stacks(source_uid, entity.uid, 90001, amount));
                     }
                 }
             }
@@ -397,7 +512,7 @@ pub(super) fn completed_action(
                 8130403 => {
                     for enemy in &pool.defender_main {
                         if managers.hp.current(enemy.uid) > 0 {
-                            ops.push(grant_stacks(action.source_uid, enemy.uid, 90101, 4));
+                            ops.push(grant_stacks(source_uid, enemy.uid, 90101, 4));
                         }
                     }
                 }
@@ -411,7 +526,7 @@ pub(super) fn completed_action(
             if determinism.roll_permille(chance) {
                 for enemy in &pool.defender_main {
                     if managers.hp.current(enemy.uid) > 0 {
-                        ops.push(grant_stacks(action.source_uid, enemy.uid, 90061, 2));
+                        ops.push(grant_stacks(source_uid, enemy.uid, 90061, 2));
                     }
                 }
             }
@@ -484,7 +599,7 @@ pub(super) fn completed_action(
                 .map(|entity| entity.uid)
                 .collect::<Vec<_>>();
             if let Some(index) = determinism.lua_random_index(enemies.len()) {
-                ops.push(grant_stacks(action.source_uid, enemies[index], 90101, 10));
+                ops.push(grant_stacks(source_uid, enemies[index], 90101, 10));
             }
         }
     }
@@ -494,7 +609,7 @@ pub(super) fn completed_action(
             if determinism.roll_permille(chance) {
                 for ally in &pool.attacker_main {
                     if managers.hp.current(ally.uid) > 0 {
-                        ops.push(grant_stacks(action.source_uid, ally.uid, 90021, 2));
+                        ops.push(grant_stacks(source_uid, ally.uid, 90021, 2));
                     }
                 }
             }
@@ -508,7 +623,7 @@ pub(super) fn completed_action(
                 .max(0);
             for entity in &pool.attacker_main {
                 if managers.hp.current(entity.uid) > 0 {
-                    ops.push(grant_stacks(action.source_uid, entity.uid, 90021, amount));
+                    ops.push(grant_stacks(source_uid, entity.uid, 90021, amount));
                 }
             }
         }
@@ -550,7 +665,7 @@ pub(super) fn completed_action(
             if item.item_id == 8130505 {
                 for entity in &pool.defender_main {
                     if managers.hp.current(entity.uid) > 0 {
-                        ops.push(grant_stacks(action.source_uid, entity.uid, 4150001, 10));
+                        ops.push(grant_stacks(source_uid, entity.uid, 4150001, 10));
                     }
                 }
             } else if item.item_id == 8330513 {
@@ -610,7 +725,7 @@ pub(super) fn completed_action(
         for item in items.iter().filter(|item| item.item_id == 8320514) {
             // The group matches the current client status family. Four-turn
             // variants are unavailable for four families, so those cap at 3.
-            // Immunity to four statuses remains a separate unimplemented part.
+            // The four-status immunity is granted separately at battle entry.
             const GROUPS: [&[i32]; 5] = [
                 &[90061, 90062, 90063],
                 &[90231, 90232, 90233],
@@ -645,7 +760,7 @@ pub(super) fn completed_action(
                 if let Some(index) = determinism.lua_random_index(candidates.len()) {
                     let group = GROUPS[candidates[index]];
                     ops.push(grant_stacks(
-                        action.source_uid,
+                        source_uid,
                         enemy.uid,
                         group[duration.min(group.len()) - 1],
                         1,
@@ -733,7 +848,7 @@ pub(super) fn completed_action(
             ));
             for entity in &pool.attacker_main {
                 if managers.hp.current(entity.uid) > 0 {
-                    ops.push(grant_stacks(action.source_uid, entity.uid, 90021, 1));
+                    ops.push(grant_stacks(source_uid, entity.uid, 90021, 1));
                 }
             }
         }
@@ -978,16 +1093,25 @@ fn update_round_attributes(managers: &mut BattleManagers, pool: &TargetPool) {
     }
 }
 
-pub(crate) fn end_round(managers: &mut BattleManagers) {
+pub(crate) fn end_round(managers: &mut BattleManagers) -> Vec<RuleOp> {
     super::catalyst::clear_round_boosts(managers);
     let Some(state) = managers.rouge.active.as_mut() else {
-        return;
+        return Vec::new();
     };
     let previous = std::mem::take(&mut state.incantation);
+    let mut markers = previous
+        .levels
+        .keys()
+        .map(|&kind| level_marker(0, 183, 0, kind))
+        .collect::<Vec<_>>();
+    if previous.resonance_level > 0 {
+        markers.push(level_marker(0, 184, 0, 0));
+    }
     state.current_syntony_bonus = std::mem::take(&mut state.next_syntony_bonus);
     for ((uid, raw), value) in previous.attributes {
         if let Some(attr) = AttrId::from_raw(raw) {
             managers.attribute.add(uid, attr, value.saturating_neg());
         }
     }
+    markers
 }

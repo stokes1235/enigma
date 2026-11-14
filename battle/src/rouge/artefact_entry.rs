@@ -24,7 +24,7 @@ use crate::engine::{
         target::TargetPool,
     },
 };
-use sonettobuf::{CardInfo, card_info::CardType, effect_type_enum::EffectType};
+use sonettobuf::{CardInfo, effect_type_enum::EffectType};
 
 use super::ORIGIN;
 
@@ -65,6 +65,15 @@ pub fn medication_skill_id(item_id: i32) -> Option<i32> {
             | 8250017
     )
     .then_some(item_id * 100 + 11)
+}
+
+/// Captured medication is a normal-looking, non-temporary scene card. Its
+/// trusted skill list and UID distinguish it from arbitrary UID 0 cards.
+pub(crate) fn is_medication_card(card: &CardInfo) -> bool {
+    card.uid == Some(0)
+        && card.skill_id.is_some_and(|skill_id| {
+            skill_id > 0 && medication_skill_id(skill_id / 100) == Some(skill_id)
+        })
 }
 
 /// Effects whose primary description is implemented by this entry module.
@@ -439,10 +448,9 @@ pub(crate) fn paid_opening(managers: &mut BattleManagers, pool: &TargetPool) -> 
     ops
 }
 
-/// Called once AFTER opening draw/refill. RefillOne preserves the real scene
-/// owner and RougeSp type without consuming a normal deck draw or resetting
-/// the dealt hand. These are persistent battle cards, not zero-AP temporary
-/// hero cards. Client FightCardDataHelper charges RougeSp one action point.
+/// Called once AFTER opening draw/refill. RefillOne preserves the captured
+/// normal-looking scene card without consuming a normal deck draw or resetting
+/// the dealt hand. Its standalone action-point cost remains unverified.
 pub(crate) fn opening_cards(entry: &EntryContext) -> Vec<RuleOp> {
     let mut sources = BTreeSet::new();
     let mut cards = entry.medication_cards.iter().collect::<Vec<_>>();
@@ -462,7 +470,7 @@ pub(crate) fn opening_cards(entry: &EntryContext) -> Vec<RuleOp> {
                         uid: Some(crate::engine::fight::rules::ATTACKER_SIDE_UID),
                         skill_id: Some(card.skill_id),
                         temp_card: Some(false),
-                        card_type: Some(CardType::RougeSp as i32),
+                        card_type: Some(0),
                         hero_id: Some(0),
                         status: Some(0),
                         energy: Some(0),

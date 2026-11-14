@@ -672,7 +672,8 @@ pub(super) fn action(
             played.card_index == action.card_index
                 && played.caster_uid == action.source_uid
                 && played.skill_id == action.skill_id
-                && played.card.card_type == Some(1)
+                && (played.card.card_type == Some(1)
+                    || crate::rouge::artefact_entry::is_medication_card(&played.card))
         });
     let mut special_ops = Vec::new();
     if special_card {
@@ -2375,7 +2376,7 @@ mod tests {
             .team_a_cards1
             .iter()
             .position(|card| {
-                card.uid == Some(0) && card.skill_id == Some(skill_id) && card.card_type == Some(1)
+                card.uid == Some(0) && card.skill_id == Some(skill_id) && card.card_type == Some(0)
             })
             .unwrap();
         crate::dungeon::begin_round(

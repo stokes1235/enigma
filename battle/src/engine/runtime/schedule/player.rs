@@ -819,6 +819,15 @@ fn run_player_card_ops(
             ))],
         )?,
     );
+    // The base Rouge run derives its round levels from the submitted cards,
+    // before any queued action can change HP or invalidate a later card.
+    let incantation = crate::rouge::settle_incantation_queue(managers, pool, determinism);
+    if !incantation.is_empty() {
+        append(
+            &mut result,
+            drain::run_command_group(managers, pool, catalog, determinism, context, incantation)?,
+        );
+    }
     for queued in skills {
         if fight
             .is_some_and(|fight| crate::engine::round::outcome::battle_ended(fight, pool, managers))
@@ -853,8 +862,9 @@ fn run_player_card_ops(
             && managers.rouge.context().is_some()
             && managers.card.played().iter().any(|played| {
                 played.card_index == skill.card_index
-                    && played.card.card_type
+                    && (played.card.card_type
                         == Some(sonettobuf::card_info::CardType::RougeSp as i32)
+                        || crate::rouge::artefact_entry::is_medication_card(&played.card))
             });
         let source_alive =
             !is_card_action || scene_rouge_card || managers.hp.current(source_uid) > 0;

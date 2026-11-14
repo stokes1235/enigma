@@ -249,14 +249,40 @@ fn local_progression_is_bounded_monotonic_and_preserves_zero_step_baseline() {
     let mut midway = profile(tables, 7, Encounter::MinorObstacle).unwrap();
     apply_local_progression(&mut midway, 10);
     assert_eq!(midway.enemy_attributes[&101], 250);
-    assert_eq!(midway.enemy_attributes[&102], 200); // 150 confirmed + 50 inferred
+    assert_eq!(midway.enemy_attributes[&102], 150); // configured difficulty only
     let mut capped = profile(tables, 20, Encounter::FinalBoss).unwrap();
     apply_local_progression(&mut capped, i32::MAX);
     assert_eq!(capped.enemy_attributes[&101], 775);
-    assert_eq!(capped.enemy_attributes[&102], 700);
+    assert_eq!(capped.enemy_attributes[&102], 550);
     let mut negative = profile(tables, 1, Encounter::MinorObstacle).unwrap();
     apply_local_progression(&mut negative, i32::MIN);
     assert!(negative.enemy_attributes.is_empty());
+}
+
+#[test]
+fn completed_nodes_change_the_local_hp_approximation_without_extra_attack_growth() {
+    let tables = tables();
+    let mut first = profile(tables, 6, Encounter::MinorObstacle).unwrap();
+    let mut later = first.clone();
+    apply_local_progression(&mut first, 0);
+    apply_local_progression(&mut later, 10);
+    let fight = Fight {
+        defender: Some(FightTeam {
+            entitys: vec![enemy(-1)],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut early_fight = fight.clone();
+    let mut later_fight = fight;
+    apply_to_defenders(tables, &mut early_fight, &mut vec![], &mut vec![], &first);
+    apply_to_defenders(tables, &mut later_fight, &mut vec![], &mut vec![], &later);
+    let early = early_fight.defender.unwrap().entitys.remove(0);
+    let late = later_fight.defender.unwrap().entitys.remove(0);
+    assert_eq!(early.attr.as_ref().unwrap().attack, Some(1150));
+    assert_eq!(late.attr.as_ref().unwrap().attack, Some(1150));
+    assert_eq!(early.attr.unwrap().hp, Some(1125));
+    assert_eq!(late.attr.unwrap().hp, Some(1225));
 }
 
 #[test]
@@ -367,7 +393,7 @@ fn run_progress_uses_archived_and_current_resolved_nodes_once() {
     };
     let result = for_run(tables(), &start, &run).unwrap();
     assert_eq!(result.enemy_attributes[&101], 250); // 7 archived + 3 unique nodes
-    assert_eq!(result.enemy_attributes[&102], 200);
+    assert_eq!(result.enemy_attributes[&102], 150);
     assert_eq!(hp_rate_for_run(tables(), &start, &run).unwrap(), 250);
     run.map_type = 2; // final boss retains the current layer's graph
     let final_boss = for_run(tables(), &start, &run).unwrap();

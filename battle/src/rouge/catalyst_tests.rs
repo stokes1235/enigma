@@ -155,6 +155,68 @@ fn cast(runtime: &mut BattleRuntime, skill: i32, target: i64) -> UseClothSkillRe
         .unwrap_or_else(|| panic!("catalyst {skill} rejected"))
 }
 
+#[test]
+fn captured_syntony_catalyst_projects_the_boost_and_both_temporary_basics() {
+    let mut runtime = start(fight(100000), context(5, 1000, 100));
+    let before = runtime.card_info_push().card_group.len();
+    let generated = cast(&mut runtime, 800040001, 10).round.unwrap();
+    let added = generated
+        .fight_step
+        .iter()
+        .flat_map(|step| &step.act_effect)
+        .filter(|effect| effect.effect_type == Some(197))
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 2);
+    for effect in added {
+        let card = effect.card_info.as_ref().expect("real generated card");
+        assert_eq!(card.uid, Some(10));
+        assert_eq!(card.card_type.unwrap_or_default(), 0);
+        assert_eq!(card.temp_card, Some(true));
+        assert_eq!(card.hero_id, Some(3003));
+    }
+    assert_eq!(runtime.card_info_push().card_group.len(), before + 2);
+    assert_eq!(runtime.rouge_resources().unwrap().power, 95);
+
+    let boosted = cast(&mut runtime, 800040002, 0).round.unwrap();
+    let markers = boosted
+        .fight_step
+        .iter()
+        .flat_map(|step| &step.act_effect)
+        .filter(|effect| effect.effect_type == Some(177))
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].target_id.unwrap_or_default(), 0);
+    assert_eq!(markers[0].effect_num, Some(1));
+    assert_eq!(runtime.rouge_resources().unwrap().power, 86);
+
+    let skill = crate::hero::active_skills(crate::test_support::game_data(), 3003, 3, 1).0[0];
+    let hand = runtime.card_info_push().card_group;
+    let index = hand.iter().position(|card| {
+        card.uid == Some(10) && card.skill_id == Some(skill) && card.temp_card == Some(true)
+    }).unwrap();
+    let request = BeginRoundRequest {
+        opers: vec![BeginRoundOper {
+            oper_type: Some(2),
+            param1: Some(index as i32 + 1),
+            to_id: Some(-1),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let round = runtime.advance_round(request.clone()).unwrap();
+    let action = round.fight_step.iter().position(|step| step.act_id == Some(skill)).unwrap();
+    assert!(round.fight_step[..action].iter().rev().any(|step| {
+        step.act_effect.iter().any(|effect| effect.effect_type == Some(111)
+            && effect.target_id == Some(10) && effect.effect_num == Some(1))
+    }), "captured temporary basic grants its owner one Moxie before acting");
+
+    let mut replay = start(fight(100000), context(5, 1000, 100));
+    cast(&mut replay, 800040001, 10);
+    cast(&mut replay, 800040002, 0);
+    assert_eq!(replay.advance_round(request).unwrap(), round);
+    assert_eq!(replay.reconnect_state(), runtime.reconnect_state());
+}
+
 fn has_step(steps: &[FightStep], source: i64, skill: i32, support: Option<i32>) -> bool {
     steps.iter().any(|step| {
         step.from_id == Some(source)

@@ -146,6 +146,12 @@ pub fn run_before_ai_round_start(
         append_round_phase(&mut action_phase, late_setup);
         append_round_phase(
             &mut action_phase,
+            run_round_start_side_skill_mechanics(
+                managers, pool, catalog, determinism, context, 2, &owner_uids,
+            )?,
+        );
+        append_round_phase(
+            &mut action_phase,
             run_action_phase_start(managers, pool, catalog, determinism, context, team)?,
         );
         append(&mut result, action_phase);
@@ -161,6 +167,12 @@ pub fn run_before_ai_round_start(
                 SetupStage::RoundStartLate,
                 0,
                 &setup_owner_uids,
+            )?,
+        );
+        append(
+            &mut result,
+            run_round_start_side_skill_mechanics(
+                managers, pool, catalog, determinism, context, 2, &owner_uids,
             )?,
         );
     }
@@ -419,6 +431,14 @@ pub fn run_round_start_after_ai_split(
     };
     let mut sync_phase = begin_round_phase(RoundPhase::RoundStartSync);
     append_round_phase(&mut sync_phase, sync_setup);
+    if version_seven {
+        append_round_phase(
+            &mut sync_phase,
+            run_round_start_side_skill_mechanics(
+                managers, pool, catalog, determinism, context, 1, &owner_uids,
+            )?,
+        );
+    }
     let deferred_settlement_setup = if version_seven {
         drain::run_skill_setup_schedule(
             managers,
@@ -459,6 +479,12 @@ pub fn run_round_start_after_ai_split(
         append(&mut fight_steps, settlement);
         append(&mut fight_steps, sync_phase);
         append(&mut fight_steps, late_setup);
+        append(
+            &mut fight_steps,
+            run_round_start_side_skill_mechanics(
+                managers, pool, catalog, determinism, context, 1, &owner_uids,
+            )?,
+        );
         append(&mut fight_steps, card_cleanup);
     }
     let hand_snapshot = managers.card.hand().to_vec();
@@ -736,6 +762,12 @@ pub fn run_start(
             )?;
             let mut sync = begin_round_phase(RoundPhase::RoundStartSync);
             append_opening_round_phase(&mut sync, sync_setup);
+            append_opening_round_phase(
+                &mut sync,
+                run_round_start_side_skill_mechanics(
+                    managers, pool, catalog, determinism, context, 1, &owner_uids,
+                )?,
+            );
             append(&mut result, sync);
             continue;
         }
@@ -1004,6 +1036,14 @@ pub fn run_start(
             );
         } else {
             append(&mut result, stage_result);
+        }
+        if !version7_opening && stage == SetupStage::RoundStartLate {
+            append(
+                &mut result,
+                run_round_start_side_skill_mechanics(
+                    managers, pool, catalog, determinism, context, 1, &owner_uids,
+                )?,
+            );
         }
         if matches!(stage, SetupStage::BattleStart | SetupStage::EnterFight) {
             let card_mechanic = crate::engine::mechanic::card::CardMechanic;
@@ -1529,6 +1569,61 @@ fn run_round_start_skill_mechanics(
         drain::ReactionLane::Skills,
         Some(owner_uids),
     )
+}
+
+/// Side-owned RoundStart subscriptions resolve after that side's per-actor
+/// late setup. The official Storm sample shows its actor-owned replacement
+/// skills settling before the battlefield-owned 8018104 card rewrite.
+fn run_round_start_side_skill_mechanics(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    catalog: &SkillEffectCatalog,
+    determinism: &mut RoundDeterminism,
+    context: TargetContext,
+    team: i32,
+    active_owners: &[i64],
+) -> Result<DrainResult, DrainError> {
+    if active_owners.is_empty() {
+        return Ok(DrainResult::default());
+    }
+    let side = match team {
+        1 => crate::engine::fight::rules::ATTACKER_SIDE_UID,
+        2 => crate::engine::fight::rules::DEFENDER_SIDE_UID,
+        _ => return Ok(DrainResult::default()),
+    };
+    let subscribers = crate::engine::skill::subscriber::for_compiled_owner_events(
+        pool,
+        managers,
+        catalog,
+        [EventKind::RoundStart],
+        &[side],
+    )
+    .map_err(DrainError::Subscriber)?;
+    if subscribers.skills.is_empty() {
+        return Ok(DrainResult::default());
+    }
+    let mut result = drain::run_group_event(
+        managers, pool, catalog, determinism, context, BattleEvent::RoundStart,
+        drain::ReactionLane::Skills, Some(&[side]),
+    )?;
+    // This is the same RoundStart event already published for the active
+    // actors, not a second event. Preserve any events caused by the skill.
+    if matches!(result.events.first(), Some(BattleEvent::RoundStart)) {
+        result.events.remove(0);
+    }
+    fn has_items(frame: &SemanticFrame) -> bool {
+        frame.items.iter().any(|item| match item {
+            FrameItem::Child(child) => has_items(child),
+            FrameItem::Change(_) | FrameItem::Cue(_) => true,
+        })
+    }
+    if result.outcomes.is_empty()
+        && result.events.is_empty()
+        && !result.frames.iter().any(has_items)
+    {
+        return Ok(DrainResult::default());
+    }
+    Ok(result)
 }
 
 fn run_round_start_damage_heal_settlement(
