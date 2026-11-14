@@ -508,7 +508,14 @@ impl BuffManager {
                 let action = match feature.kind {
                     Some(BuffActKind::Immunity)
                         if active.owner_uid == target_uid
-                            && incoming_status == BuffStatus::Control =>
+                            && (incoming_status == BuffStatus::Control
+                                // Client type 7001 is the general Immunity
+                                // status: its description explicitly includes
+                                // Stats Down and Negative Status as well as
+                                // Control. Other 502 carriers retain the
+                                // existing control-only behavior.
+                                || (active.type_id == 7001
+                                    && matches!(incoming_status, BuffStatus::StatsDown | BuffStatus::NegativeStatus))) =>
                     {
                         command::ConsumeAction::Noop
                     }

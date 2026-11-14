@@ -134,6 +134,8 @@ pub struct ActionEvent {
     pub assassinate: bool,
     pub damage_amount: i32,
     pub kill_count: i32,
+    /// Deaths of opposing entities credited to this actual action source.
+    pub enemy_kill_count: i32,
     pub crit_count: i32,
     pub teammate_injury_count: i32,
     pub teammate_injury_count_not_reset: i32,

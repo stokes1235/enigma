@@ -556,3 +556,69 @@ fn card_generation_rejects_mismatched_skill_ids_and_duplicate_instance_sources()
     assert_eq!(opening_cards(&entry).len(), 1);
     assert_eq!(medication_skill_ids(&entry), vec![815000611]);
 }
+
+#[test]
+fn missing_entry_effects_apply_to_live_targets_with_frozen_layout_counts() {
+    let entry = EntryContext::default();
+    let mut frozen = context(&[8130018, 8320046, 8330816], entry.clone());
+    frozen.first_slot_uid = Some(11);
+    frozen.artefacts[0].count2 = 1;
+    frozen.artefacts[0].medication_in_range = 2;
+    frozen.artefacts[2].electric_artefact_count = 3;
+    let (mut managers, pool, catalog, mut random) = fixture(frozen);
+    let ops = opening(&managers, &pool, &entry);
+    settle(&mut managers, &pool, &catalog, &mut random, ops);
+    for uid in [10, 11] {
+        assert_eq!(managers.buff.buff_id_amount(uid, 301), 4);
+    }
+    for uid in [-1, -2] {
+        assert_eq!(managers.buff.buff_id_amount(uid, 90153), 4);
+        assert_eq!(managers.buff.buff_id_amount(uid, 5122), 1);
+    }
+    assert_eq!(managers.buff.buff_id_amount(10, 90071), 0);
+    assert_eq!(managers.buff.buff_id_amount(11, 90071), 3);
+}
+
+#[test]
+fn bullet_magazine_opens_with_five_deterministic_distinct_carriers_per_ally() {
+    let entry = EntryContext {
+        seed: 423,
+        ..Default::default()
+    };
+    let frozen = context(&[8330715], entry.clone());
+    let (mut managers, pool, catalog, mut random) = fixture(frozen);
+    let ops = opening(&managers, &pool, &entry);
+    assert_eq!(
+        format!("{ops:?}"),
+        format!("{:?}", opening(&managers, &pool, &entry))
+    );
+    settle(&mut managers, &pool, &catalog, &mut random, ops);
+    for uid in [10, 11] {
+        let counts = (91130031..=91130039)
+            .map(|id| managers.buff.buff_id_amount(uid, id))
+            .collect::<Vec<_>>();
+        assert_eq!(counts.iter().sum::<i32>(), 5);
+        assert_eq!(counts.iter().filter(|&&count| count > 0).count(), 5);
+    }
+}
+
+#[test]
+fn jade_ring_loses_max_hp_only_in_present_danger_and_is_not_character_damage() {
+    let entry = EntryContext::default();
+    for present_danger in [false, true] {
+        let mut frozen = context(&[8330413], entry.clone());
+        // Crisis alone must not activate this entrance effect.
+        frozen.danger_or_crisis = true;
+        frozen.present_danger = present_danger;
+        let (mut managers, pool, catalog, mut random) = fixture(frozen);
+        let ops = opening(&managers, &pool, &entry);
+        settle(&mut managers, &pool, &catalog, &mut random, ops);
+        for uid in [-1, -2] {
+            assert_eq!(
+                managers.hp.current(uid),
+                if present_danger { 4250 } else { 5000 }
+            );
+        }
+        assert_eq!(managers.rouge.summary().unwrap().damage_dealt, 0);
+    }
+}

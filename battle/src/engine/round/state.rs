@@ -97,7 +97,11 @@ pub fn next_action_points(
     let rule_bonus =
         super::modifier::action_point_bonus(pool, managers, catalog, determinism, context);
 
-    alive_attackers + buff_bonus + rule_bonus
+    alive_attackers
+        .saturating_add(buff_bonus)
+        .saturating_add(rule_bonus)
+        .saturating_add(crate::rouge::persistent_action_point_bonus(managers))
+        .saturating_add(crate::rouge::pending_action_point_bonus(managers))
 }
 
 pub fn next_round_shell(

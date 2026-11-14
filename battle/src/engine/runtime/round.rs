@@ -600,6 +600,7 @@ impl BattleRuntime {
                 &mut self.determinism,
                 context,
             );
+            crate::rouge::consume_pending_action_points(&mut self.managers);
             if let Some(power) = self
                 .catalog_data
                 .expect("battle runtime was not constructed with a catalog")

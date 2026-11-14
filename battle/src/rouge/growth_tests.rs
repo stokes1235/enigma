@@ -572,3 +572,685 @@ fn frozen_growth_context_and_real_cast_operations_replay_counters_attributes_and
     assert!(ordinary.managers.rouge.summary().is_none());
     assert!(ordinary.managers.rouge.counters().is_empty());
 }
+
+#[test]
+fn resource_artefacts_credit_actual_spells_once_and_replay_deterministically() {
+    let mut frozen = context(&[8230614, 8310510], 0);
+    frozen.artefacts[1].count2 = 3;
+    frozen.artefacts[1].non_resonance_in_range = true;
+    frozen.catalyst = Some(Catalyst {
+        style_id: 1,
+        coin: 100,
+        power_limit: 100,
+        ..Default::default()
+    });
+    let run = |frozen: RougeContext| {
+        let mut h = Harness::new(Some(frozen));
+        for skill in [30030112, 30030112, 30030111, 30030111, 30050121, 30090121] {
+            h.cast(10, skill, true, false);
+        }
+        assert_eq!(h.managers.rouge.resources().unwrap().coin, 156);
+        assert_eq!(h.managers.buff.buff_id_amount(10, 90021), 6);
+        end_incantation_round(&mut h.managers);
+        for skill in [30030111, 30030111, 30030111] {
+            h.cast(10, skill, true, false);
+        }
+        assert_eq!(
+            h.managers.rouge.resources().unwrap().coin,
+            176,
+            "first syntony awards the bomb once"
+        );
+        end_incantation_round(&mut h.managers);
+        for skill in [30030111, 30030111, 30030111] {
+            h.cast(10, skill, true, false);
+        }
+        assert_eq!(
+            h.managers.rouge.resources().unwrap().coin,
+            176,
+            "bomb syntony is once per battle"
+        );
+        (h.managers.rouge.resources().unwrap().clone(), h.frames)
+    };
+    assert_eq!(run(frozen.clone()), run(frozen));
+}
+
+#[test]
+fn claw_rank_spell_works_before_syntony_unlock() {
+    let mut frozen = context(&[8310510], 0);
+    frozen.incantation_rules = None;
+    frozen.catalyst = Some(Catalyst {
+        style_id: 1,
+        coin: 10,
+        power_limit: 100,
+        ..Default::default()
+    });
+    let mut h = Harness::new(Some(frozen));
+    h.cast(10, 30030112, true, false);
+    assert_eq!(h.managers.rouge.resources().unwrap().coin, 15);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90021), 2);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90021), 0);
+    h.cast(10, 30030112, false, false);
+    assert_eq!(h.managers.rouge.resources().unwrap().coin, 15);
+}
+
+#[test]
+fn syntony_and_resonance_artefacts_affect_the_correct_teams() {
+    let mut h = Harness::new(Some(context(&[8120416, 8130505, 8330513], 0)));
+    for skill in [30030111, 30030111, 30030111] {
+        h.cast(10, skill, true, false);
+    }
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90031), 5);
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90032), 5);
+    }
+    h.cast(10, 30030112, true, false);
+    h.cast(10, 30050121, true, false);
+    // Resonance adds 10 to both enemies. The directly hit enemy can also
+    // receive additional stacks from the same artefact's 50% on-hit effect.
+    assert_eq!(h.managers.buff.buff_id_amount(-2, 4150001), 10);
+    assert!(h.managers.buff.buff_id_amount(-1, 4150001) >= 10);
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 2);
+    }
+    h.run(vec![
+        grant(10, -1, 90021),
+        grant(10, -1, 90021),
+        grant(10, -1, 90021),
+    ]);
+    h.cast(10, 30090121, true, false);
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90021), 1);
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 6);
+    }
+}
+
+#[test]
+fn wyrm_toe_rolls_once_per_syntony_and_targets_each_living_enemy() {
+    let mut frozen = context(&[8110410], 0);
+    frozen.artefacts[0].count2 = 25; // one base Syntony Disk: 75%
+    let mut h = Harness::new(Some(frozen));
+    h.cast(10, 30030111, true, false);
+    h.cast(10, 30030111, true, false);
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90061), 0);
+    h.random.enqueue_permille_rolls([749, 750]);
+    h.cast(10, 30030111, true, false);
+    for uid in [-1, -2] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90061), 2);
+    }
+    h.cast(10, 30030111, true, false);
+    for uid in [-1, -2] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90061), 2);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90061), 0);
+}
+
+#[test]
+fn timid_caltrop_rolls_once_per_resonance_and_uses_the_real_thorns_status() {
+    let mut frozen = context(&[8120512], 0);
+    frozen.artefacts[0].count2 = 25; // one base Resonance Disk: 75%
+    let mut h = Harness::new(Some(frozen));
+    h.random.enqueue_permille_rolls([749, 750]);
+    h.cast(10, 30030111, true, false);
+    h.cast(10, 30050121, true, false);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90021), 0);
+    h.cast(10, 30090121, true, false);
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 2);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90021), 0);
+    end_incantation_round(&mut h.managers);
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 2);
+    }
+}
+
+#[test]
+fn wyrm_toe_uses_telescope_probability_and_does_not_trigger_when_absent() {
+    let mut frozen = context(&[8110410], 0);
+    frozen.artefacts[0].extra_action_chance_doublers = 1;
+    let mut h = Harness::new(Some(frozen));
+    h.random.enqueue_permille_rolls([999]);
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90061), 2);
+    let mut without = Harness::new(Some(context(&[], 0)));
+    for _ in 0..3 {
+        without.cast(10, 30030111, true, false);
+    }
+    assert_eq!(without.managers.buff.buff_id_amount(-1, 90061), 0);
+}
+
+#[test]
+fn syntony_eye_thresholds_are_independent_once_per_fight_and_use_frozen_range() {
+    for nearby in [false, true] {
+        let mut frozen = context(&[8210411], 0);
+        frozen.artefacts[0].count2 = 2;
+        frozen.artefacts[0].syntony_in_range = nearby;
+        let mut h = Harness::new(Some(frozen));
+        for _ in 0..3 {
+            h.cast(10, 30030111, true, false);
+        }
+        assert_eq!(h.managers.buff.buff_id_amount(10, 90001), 0);
+        h.cast(10, 30030111, true, false);
+        assert_eq!(
+            h.managers.buff.buff_id_amount(10, 90001),
+            if nearby { 6 } else { 0 }
+        );
+        h.cast(10, 30030111, true, false);
+        let expected = if nearby { 17 } else { 11 };
+        assert_eq!(h.managers.buff.buff_id_amount(10, 90001), expected);
+        assert_eq!(h.managers.buff.buff_id_amount(11, 90001), expected);
+        end_incantation_round(&mut h.managers);
+        for _ in 0..5 {
+            h.cast(10, 30030111, true, false);
+        }
+        assert_eq!(h.managers.buff.buff_id_amount(10, 90001), expected);
+    }
+}
+
+#[test]
+fn syntony_eye_level_jump_crosses_both_thresholds_once() {
+    let mut frozen = context(&[8210411], 0);
+    frozen.artefacts[0].syntony_in_range = true;
+    frozen.catalyst = Some(Catalyst {
+        style_id: 5,
+        ..Default::default()
+    });
+    let mut h = Harness::new(Some(frozen));
+    // The style and its active boost raise the first trigger directly to 3.
+    h.managers
+        .rouge
+        .active
+        .as_mut()
+        .unwrap()
+        .catalyst
+        .as_mut()
+        .unwrap()
+        .syntony_boost = 1;
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90001), 15);
+    h.cast(10, 30030111, true, false);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90001), 15);
+}
+
+#[test]
+fn resonance_artefacts_preserve_every_draw_and_prioritize_missing_buffs() {
+    let mut frozen = context(&[8130503, 8130504, 8220516, 8320511], 0);
+    frozen.artefacts[2].count2 = 2;
+    frozen.artefacts[2].non_resonance_in_range = true;
+    frozen.artefacts[3].count2 = 2;
+    frozen.artefacts[3].resonance_artefact_count = 3;
+    frozen.catalyst = Some(Catalyst {
+        style_id: 6,
+        ..Default::default()
+    });
+    let mut h = Harness::new(Some(frozen));
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    // 1 + 1 + (1+2+1) + (1+2+3) = 12 rolls per ally.
+    for uid in [10, 11] {
+        let ids = [90001, 90011, 90041, 90021, 90031, 90281];
+        assert!(
+            ids.iter()
+                .all(|id| h.managers.buff.buff_id_amount(uid, *id) > 0)
+        );
+        assert_eq!(
+            ids.iter()
+                .map(|id| h.managers.buff.buff_id_amount(uid, *id))
+                .sum::<i32>(),
+            12
+        );
+    }
+    end_incantation_round(&mut h.managers);
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    for uid in [10, 11] {
+        let ids = [90001, 90011, 90041, 90021, 90031, 90281];
+        assert_eq!(
+            ids.iter()
+                .map(|id| h.managers.buff.buff_id_amount(uid, *id))
+                .sum::<i32>(),
+            24
+        );
+    }
+}
+
+#[test]
+fn compass_uses_effective_attack_and_grants_actual_status_immunity() {
+    let mut h = Harness::new(Some(context(&[8330412], 0)));
+    h.managers.attribute.add(11, AttrId::Attack, 1000);
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 500212), 0);
+    assert!(h.managers.buff.buff_id_amount(11, 500212) > 0);
+    h.run(vec![RuleOp::Command(BattleCommand::Buff(
+        BuffCommand::Grant(BuffGrant {
+            origin: ORIGIN,
+            source_uid: -1,
+            target_uid: 11,
+            buff_id: 90152,
+            amount: Some(1),
+            occurrences: 1,
+            child_uid_reservations: 0,
+        }),
+    ))]);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90152), 0);
+    h.cast(10, 30030111, true, false);
+    h.cast(10, 30030111, true, false);
+    assert!(h.managers.buff.buff_id_amount(10, 500212) > 0);
+    assert!(h.managers.buff.buff_id_amount(11, 500212) > 0);
+}
+
+#[test]
+fn lanterns_prioritize_distinct_negative_statuses_and_replay_deterministically() {
+    let mut frozen = context(&[8320514, 8320514], 0);
+    for item in &mut frozen.artefacts {
+        item.count2 = 3;
+        item.non_resonance_in_range = true;
+    }
+    let run = |frozen: RougeContext| {
+        let mut h = Harness::new(Some(frozen));
+        for skill in [30030111, 30050121, 30090121] {
+            h.cast(10, skill, true, false);
+        }
+        let ids = [90063, 90233, 90154, 90223, 90163];
+        let result: Vec<Vec<i32>> = [-1, -2]
+            .into_iter()
+            .map(|uid| {
+                ids.iter()
+                    .map(|id| h.managers.buff.buff_id_amount(uid, *id))
+                    .collect()
+            })
+            .collect();
+        for amounts in &result {
+            assert_eq!(amounts.iter().filter(|&&n| n > 0).count(), 2);
+        }
+        result
+    };
+    assert_eq!(run(frozen.clone()), run(frozen));
+}
+
+#[test]
+fn lantern_recognizes_existing_negative_statuses_by_type_not_exact_id() {
+    let mut h = Harness::new(Some(context(&[8320514], 0)));
+    // These are duration or skill-specific IDs, but share the same semantic
+    // status types as the lantern's own Poison, Bleed, Pollution and Corrode.
+    for buff_id in [5051, 21231, 90231, 90221] {
+        h.run(vec![RuleOp::Command(BattleCommand::Buff(
+            BuffCommand::Grant(BuffGrant {
+                origin: ORIGIN,
+                source_uid: 10,
+                target_uid: -1,
+                buff_id,
+                amount: Some(1),
+                occurrences: 1,
+                child_uid_reservations: 0,
+            }),
+        ))]);
+    }
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    // The only missing status family is Gash; a random exact-ID-only check
+    // could mistakenly choose Bleed 90161 even though 5051 was already active.
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90061), 1);
+    assert_eq!(h.managers.buff.buff_id_amount(-1, 90161), 0);
+    assert!(h.managers.buff.has_active_buff_id_or_type(-1, 6002));
+}
+
+#[test]
+fn lantern_recognizes_pending_alternative_status_ids_by_type_and_target() {
+    let h = Harness::new(Some(context(&[8320514], 0)));
+    let pending = vec![RuleOp::Command(BattleCommand::Buff(BuffCommand::Grant(
+        BuffGrant {
+            origin: ORIGIN,
+            source_uid: 10,
+            target_uid: -1,
+            buff_id: 5052,
+            amount: Some(1),
+            occurrences: 1,
+            child_uid_reservations: 0,
+        },
+    )))];
+    assert!(super::growth::lantern_status_present(
+        &h.managers,
+        -1,
+        6002,
+        &pending
+    ));
+    assert!(!super::growth::lantern_status_present(
+        &h.managers,
+        -2,
+        6002,
+        &pending
+    ));
+    assert!(!super::growth::lantern_status_present(
+        &h.managers,
+        -1,
+        6003,
+        &pending
+    ));
+}
+
+#[test]
+fn resonance_crossbow_targets_one_live_ally_with_frozen_range_tier() {
+    for nearby in [false, true] {
+        let mut frozen = context(&[8210105], 0);
+        frozen.artefacts[0].count2 = 50; // 100% makes target selection test deterministic.
+        frozen.artefacts[0].non_support_in_range = nearby;
+        let mut h = Harness::new(Some(frozen));
+        for skill in [30030111, 30050121, 30090121] {
+            h.cast(10, skill, true, false);
+        }
+        let (empower, support) = if nearby { (5024, 90332) } else { (5021, 90331) };
+        let owners: Vec<_> = [10, 11]
+            .into_iter()
+            .filter(|uid| h.managers.buff.buff_id_amount(*uid, empower) > 0)
+            .collect();
+        assert_eq!(owners.len(), 1);
+        assert!(h.managers.buff.buff_id_amount(owners[0], support) > 0);
+    }
+}
+
+#[test]
+fn glasses_queue_independent_team_action_points_for_the_next_round() {
+    let mut h = Harness::new(Some(context(&[8230414, 8230509, 8330417], 0)));
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(super::pending_action_point_bonus(&h.managers), 2);
+    for skill in [30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    assert_eq!(super::pending_action_point_bonus(&h.managers), 4);
+    end_incantation_round(&mut h.managers);
+    assert_eq!(super::pending_action_point_bonus(&h.managers), 4);
+    super::consume_pending_action_points(&mut h.managers);
+    assert_eq!(super::pending_action_point_bonus(&h.managers), 0);
+    assert_eq!(super::persistent_action_point_bonus(&h.managers), 0);
+}
+
+#[test]
+fn aid_artefacts_queue_next_round_syntony_and_obey_per_fight_caps() {
+    let mut frozen = context(&[8220409, 8310407], 0);
+    frozen.artefacts[0].count2 = 40; // 60% + 40% = 100%.
+    let mut h = Harness::new(Some(frozen));
+    for _ in 0..6 {
+        h.cast(10, 30040111, true, true);
+    }
+    let active = h.managers.rouge.active.as_ref().unwrap();
+    assert_eq!(active.next_syntony_bonus, 7); // black horn 2, ancient axe 5.
+    assert_eq!(active.current_syntony_bonus, 0);
+    end_incantation_round(&mut h.managers);
+    assert_eq!(
+        h.managers
+            .rouge
+            .active
+            .as_ref()
+            .unwrap()
+            .current_syntony_bonus,
+        7
+    );
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.rouge.summary().unwrap().syntony_max_level, 5);
+    end_incantation_round(&mut h.managers);
+    assert_eq!(
+        h.managers
+            .rouge
+            .active
+            .as_ref()
+            .unwrap()
+            .current_syntony_bonus,
+        0
+    );
+}
+
+#[test]
+fn syntony_axe_level_two_grant_and_level_five_dodge_use_real_cards() {
+    let mut frozen = context(&[8310407, 8320408], 0);
+    frozen.artefacts[0].count2 = 60; // 40% + 60% = 100%.
+    let mut h = Harness::new(Some(frozen));
+    for _ in 0..4 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90001), 12);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90001), 12);
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90201), 1);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90201), 1);
+}
+
+#[test]
+fn ultimate_queues_inlay_and_frozen_range_boost_until_next_round() {
+    let mut frozen = context(&[8320408], 0);
+    frozen.artefacts[0].count2 = 2;
+    frozen.artefacts[0].syntony_in_range_count = 4;
+    let mut h = Harness::new(Some(frozen));
+    h.catalog.insert(ParsedSkillEffect {
+        skill_id: 30030131,
+        slots: vec![],
+    });
+    h.catalog.insert_damage_rate(30030131, 1000);
+    h.catalog.insert_logic_target(30030131, 1);
+    h.catalog.insert_effect_tag(30030131, 1);
+    h.cast(10, 30030131, true, false);
+    assert_eq!(
+        h.managers.rouge.active.as_ref().unwrap().next_syntony_bonus,
+        4
+    );
+    end_incantation_round(&mut h.managers);
+    assert_eq!(
+        h.managers
+            .rouge
+            .active
+            .as_ref()
+            .unwrap()
+            .current_syntony_bonus,
+        4
+    );
+}
+
+#[test]
+fn bullet_loss_consumes_actual_stacks_once_and_queues_only_up_to_quota() {
+    use crate::engine::manager::buff::{BuffConsume, BuffSelector, DepletedBuff};
+    let mut frozen = context(&[8220415], 0);
+    frozen.artefacts[0].count2 = 20; // 80% + 20% = 100%.
+    let mut h = Harness::new(Some(frozen));
+    h.run(vec![RuleOp::Command(BattleCommand::Buff(
+        BuffCommand::Grant(BuffGrant {
+            origin: ORIGIN,
+            source_uid: 10,
+            target_uid: 10,
+            buff_id: 90501,
+            amount: Some(3),
+            occurrences: 1,
+            child_uid_reservations: 0,
+        }),
+    ))]);
+    let bullet_uid = h.managers.buff.buff_id_or_type_uid(10, 90501).unwrap();
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90501), 3);
+    h.run(vec![RuleOp::Command(BattleCommand::Buff(
+        BuffCommand::ConsumeCoalesced(BuffConsume {
+            origin: ORIGIN,
+            target_uid: 10,
+            selector: BuffSelector::ExactId(90501),
+            amount: 1,
+            depleted: DepletedBuff::Remove,
+        }),
+    ))]);
+    assert_eq!(
+        h.managers.rouge.active.as_ref().unwrap().next_syntony_bonus,
+        1
+    );
+    let duplicate = BattleEvent::BuffChanged(crate::engine::event::payload::BuffChangeEvent {
+        source_uid: 10,
+        target_uid: 10,
+        buff_uid: bullet_uid,
+        buff_id: 90501,
+        before_amount: 3,
+        after_amount: 2,
+        act_id: 0,
+        act_value: 0,
+        duration_expired: false,
+    });
+    super::growth::observe_bullet_change(&mut h.managers, &h.pool, &duplicate, &mut h.random);
+    assert_eq!(
+        h.managers.rouge.active.as_ref().unwrap().next_syntony_bonus,
+        1
+    );
+    h.run(vec![RuleOp::Command(BattleCommand::Buff(
+        BuffCommand::ConsumeCoalesced(BuffConsume {
+            origin: ORIGIN,
+            target_uid: 10,
+            selector: BuffSelector::ExactId(90501),
+            amount: 2,
+            depleted: DepletedBuff::Remove,
+        }),
+    ))]);
+    assert_eq!(
+        h.managers.rouge.active.as_ref().unwrap().next_syntony_bonus,
+        2
+    );
+    end_incantation_round(&mut h.managers);
+    assert_eq!(
+        h.managers
+            .rouge
+            .active
+            .as_ref()
+            .unwrap()
+            .current_syntony_bonus,
+        2
+    );
+}
+
+#[test]
+fn jade_ring_syntony_direct_hp_loss_is_not_counted_as_player_damage() {
+    let mut h = Harness::new(Some(context(&[8330413], 0)));
+    for _ in 0..3 {
+        h.cast(10, 30030111, true, false);
+    }
+    assert_eq!(h.managers.hp.current(-1), 4465); // 4700 after attacks, then -5%.
+    assert_eq!(h.managers.hp.current(-2), 4750);
+    assert_eq!(h.managers.rouge.summary().unwrap().damage_dealt, 300);
+}
+
+#[test]
+fn golden_shears_resonance_gives_all_allies_frozen_range_and_inlay_thorns() {
+    let mut frozen = context(&[8210508], 0);
+    frozen.artefacts[0].count4 = 2;
+    frozen.artefacts[0].non_resonance_in_range = true;
+    let mut h = Harness::new(Some(frozen));
+    for skill in [30030111, 30050121, 30090121] {
+        h.cast(10, skill, true, false);
+    }
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90021), 5);
+    assert_eq!(h.managers.buff.buff_id_amount(11, 90021), 5);
+}
+
+#[test]
+fn telescope_guarantees_both_extra_action_procs_on_real_cast() {
+    let mut frozen = context(&[8230714], 0);
+    frozen.artefacts[0].extra_action_chance_doublers = 1;
+    let mut h = Harness::new(Some(frozen));
+    h.cast(10, 30030111, false, false);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90001), 2);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90002), 2);
+}
+
+#[test]
+fn telescope_probability_multiplies_then_caps_without_touching_noncovered_sources() {
+    let mut item = Artefact::default();
+    assert_eq!(item.proc_chance(250), 250);
+    item.extra_action_chance_doublers = 1;
+    assert_eq!(item.proc_chance(250), 500);
+    assert_eq!(item.proc_chance(600), 1000);
+    item.extra_action_chance_doublers = 2;
+    assert_eq!(item.proc_chance(250), 1000);
+    assert_eq!(item.proc_chance(-10), 0);
+}
+
+#[test]
+fn stag_struggle_grants_thorns_and_blessing_on_actual_resonance() {
+    let mut frozen = context(&[8320709], 0);
+    // Isolate resonance from the item's independent first/extra action rolls.
+    frozen.artefacts[0].count2 = -60;
+    frozen.artefacts[0].count4 = -50;
+    let mut h = Harness::new(Some(frozen));
+    h.cast(10, 30030111, true, false);
+    h.cast(10, 30050121, true, false);
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 0);
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 91210030), 0);
+    }
+    h.cast(10, 30090121, true, false);
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90021), 1);
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 91210030), 1);
+    }
+}
+
+#[test]
+fn lance_ultimate_awards_ritual_and_reports_only_actual_new_stacks() {
+    let mut frozen = context(&[8210209], 0);
+    frozen.incantation_rules = None; // Lance is independent of the unlock.
+    frozen.artefacts[0].count2 = 1;
+    frozen.artefacts[0].count4 = 50; // 100% chance.
+    frozen
+        .permanent_growth
+        .insert(100, BTreeMap::from([("ritual_stacks".to_owned(), 8)]));
+    let mut h = Harness::new(Some(frozen));
+    h.catalog.insert(ParsedSkillEffect {
+        skill_id: 30030131,
+        slots: vec![],
+    });
+    h.catalog.insert_damage_rate(30030131, 1000);
+    h.catalog.insert_logic_target(30030131, 1);
+    h.catalog.insert_effect_tag(30030131, 1);
+    h.run(vec![damage(-1, -1, 4950)]);
+    assert_eq!(h.managers.hp.current(-1), 50);
+    h.cast(10, 30030131, true, false);
+    assert_eq!(h.managers.hp.current(-1), 0);
+    assert_eq!(h.managers.rouge.counters()[&100]["ritual_stacks"], 1);
+    // 2 base + 1 inlay + 8 prior + 1 newly earned. The local timing policy
+    // lets the kill increase the award from the same completed ultimate.
+    for uid in [10, 11] {
+        assert_eq!(h.managers.buff.buff_id_amount(uid, 90091), 12);
+    }
+    assert_eq!(h.managers.attribute.get(10, AttrId::DmgBonus), 0);
+}
+
+#[test]
+fn lance_ritual_stack_limit_and_failed_roll_are_independent() {
+    let mut frozen = context(&[8210209], 0);
+    frozen
+        .permanent_growth
+        .insert(100, BTreeMap::from([("ritual_stacks".to_owned(), 9)]));
+    frozen.artefacts[0].count4 = -50; // 0% means kill growth still applies.
+    let mut h = Harness::new(Some(frozen));
+    let action = crate::engine::skill::action::ActionEvent {
+        source_uid: 10,
+        skill_id: 30030131,
+        enemy_kill_count: 4,
+        ..Default::default()
+    };
+    let ops = growth::completed_action(&mut h.managers, &h.pool, &action, &mut h.random);
+    h.run(ops);
+    assert_eq!(h.managers.rouge.counters()[&100]["ritual_stacks"], 1);
+    assert_eq!(h.managers.buff.buff_id_amount(10, 90091), 0);
+    let ops = growth::completed_action(&mut h.managers, &h.pool, &action, &mut h.random);
+    h.run(ops);
+    assert_eq!(h.managers.rouge.counters()[&100]["ritual_stacks"], 1);
+}

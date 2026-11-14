@@ -302,7 +302,7 @@ pub(in crate::engine::runtime) fn emit_ops(
     }
     if !resuming_phase && active_phase == Some(SkillPhase::Immediate) {
         if managers.rouge.context().is_some() {
-            execution.prepare_rouge(managers, pool, catalog, &invocation);
+            execution.prepare_rouge(managers, pool, catalog, &invocation, determinism);
         }
         if let Some(modifier) = invocation.rate_modifier {
             execution.modifiers.rates.push(modifier);
@@ -1304,6 +1304,7 @@ pub(in crate::engine::runtime) fn emit_ops(
                         assassinate: execution.context.active_skill_assassinate,
                         damage_amount: execution.context.action_damage_amount,
                         kill_count: execution.context.action_kill_count,
+                        enemy_kill_count: execution.enemy_kill_count,
                         crit_count: execution.context.action_crit_count,
                         teammate_injury_count: execution.injured_allies.len() as i32,
                         teammate_injury_count_not_reset: execution.injured_allies.len() as i32,

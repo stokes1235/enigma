@@ -122,10 +122,12 @@ fn plan(
         .multiplier_bonus
         .map(|(attr, rate)| (managers.origin_attribute(attribute_source_uid, attr), rate));
     let amount = shield_amount(basis, amount_rate, multiplier_bonus);
-    let max = managers
-        .origin_attribute(attribute_source_uid, command.max_attr)
-        .saturating_mul(command.max_rate)
-        / 1000;
+    // The intermediate product may exceed i32 even when the final shield
+    // limit is perfectly representable. Saturate only after division.
+    let max = (i64::from(managers.origin_attribute(attribute_source_uid, command.max_attr))
+        * i64::from(command.max_rate)
+        / 1000)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
 
     match command.scope {
         ShieldScope::Entity => {

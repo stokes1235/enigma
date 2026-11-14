@@ -258,6 +258,22 @@ impl CardPacket {
         }
     }
 
+    /// 3.9 catalyst-generated normal temporary cards, verified against the
+    /// MASTERADDHANDCARD response and client playEffect197.
+    pub fn catalyst_master_card(card: CardInfo, team_type: i32) -> ActEffect {
+        let card = wire_card(card);
+        ActEffect {
+            target_id: card.uid,
+            effect_type: Some(EffectType::Masteraddhandcard as i32),
+            effect_num: Some(0),
+            config_effect: Some(0),
+            reserve_id: Some(0),
+            card_info: Some(card),
+            team_type: Some(team_type),
+            ..Default::default()
+        }
+    }
+
     pub fn change_to_temp_card(target_uid: i64, reserve_str: String, team_type: i32) -> ActEffect {
         ActEffect {
             target_id: Some(target_uid),

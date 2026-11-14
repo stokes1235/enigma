@@ -368,3 +368,260 @@ fn conditional_damage_belongs_only_to_the_qualifying_skill_execution() {
     }
     assert_eq!(damages, [150, 100, 150]);
 }
+
+#[test]
+fn target_artefacts_apply_only_to_the_affected_target() {
+    let (mut managers, pool, mut catalog, mut random) = fixture(Some(context(&[8330211, 8210031])));
+    run(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        1,
+        vec![grant(10, -1, 4150001), grant(10, -2, 4031)],
+    );
+    assert_eq!(
+        target_attack_attributes(&managers, 10, -1, false),
+        vec![(AttrId::DmgBonus, 500)]
+    );
+    assert_eq!(
+        target_attack_attributes(&managers, 10, -2, false),
+        vec![(AttrId::CriticalRate, 1000), (AttrId::DmgBonus, 300)]
+    );
+    catalog.insert(ParsedSkillEffect {
+        skill_id: 30030111,
+        slots: vec![],
+    });
+    catalog.insert_damage_rate(30030111, 1000);
+    catalog.insert_logic_target(30030111, 1);
+    catalog.insert_effect_tag(30030111, 1);
+    let before = managers.hp.current(-1);
+    let mut invocation: SkillInvocation = SkillRequest {
+        source_uid: 10,
+        skill_id: 30030111,
+    }
+    .into();
+    invocation.mode = crate::engine::skill::action::SkillExecutionMode::Active;
+    invocation.target = SkillTarget::Explicit(-1);
+    drain::run_skill(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        TargetContext {
+            current_round: 1,
+            ..Default::default()
+        },
+        invocation,
+        SkillModifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(before - managers.hp.current(-1), 150);
+    assert_eq!(managers.attribute.get(10, AttrId::DmgBonus), 0);
+    let (plain, _, _, _) = fixture(None);
+    assert!(target_attack_attributes(&plain, 10, -1, false).is_empty());
+}
+
+#[test]
+fn frilled_collar_channel_attack_scales_real_damage_per_target_and_skill_kind() {
+    use crate::engine::manager::buff::BuffStatus;
+    use crate::engine::runtime::determinism::SkillTargetChoice;
+
+    let (mut managers, pool, mut catalog, mut random) = fixture(Some(context(&[8220033])));
+    for skill_id in [30030111, 30030131] {
+        catalog.insert(ParsedSkillEffect {
+            skill_id,
+            slots: vec![],
+        });
+        catalog.insert_damage_rate(skill_id, 1000);
+        catalog.insert_logic_target(skill_id, 1);
+        catalog.insert_effect_tag(skill_id, 1);
+    }
+    let cast = |managers: &mut BattleManagers,
+                random: &mut RoundDeterminism,
+                skill_id: i32,
+                target_uid: i64| {
+        let before = managers.hp.current(target_uid);
+        let mut invocation: SkillInvocation = SkillRequest {
+            source_uid: 10,
+            skill_id,
+        }
+        .into();
+        invocation.mode = crate::engine::skill::action::SkillExecutionMode::Active;
+        invocation.target = SkillTarget::Explicit(target_uid);
+        drain::run_skill(
+            managers,
+            &pool,
+            &catalog,
+            random,
+            TargetContext {
+                current_round: 1,
+                ..Default::default()
+            },
+            invocation,
+            SkillModifiers::default(),
+        )
+        .unwrap();
+        before - managers.hp.current(target_uid)
+    };
+    assert_eq!(cast(&mut managers, &mut random, 30030111, -1), 100);
+    run(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        1,
+        vec![grant(10, 10, 30840121)],
+    );
+    assert!(
+        !managers
+            .buff
+            .buffs_with_status(10, BuffStatus::Channel)
+            .is_empty()
+    );
+    assert_eq!(cast(&mut managers, &mut random, 30030111, -1), 110);
+    run(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        1,
+        vec![grant(10, -2, 30840121)],
+    );
+    assert!(
+        !managers
+            .buff
+            .buffs_with_status(-2, BuffStatus::Channel)
+            .is_empty()
+    );
+    assert_eq!(cast(&mut managers, &mut random, 30030111, -2), 125);
+    assert_eq!(cast(&mut managers, &mut random, 30030131, -2), 115);
+    assert_eq!(cast(&mut managers, &mut random, 30030131, -1), 100);
+    assert_eq!(managers.attribute.get(10, AttrId::Attack), 0);
+    assert_eq!(managers.attribute.base(10, AttrId::Attack), 100);
+
+    // One actual multi-target action must apply the target bonus only to -2.
+    catalog.insert_logic_target(30030111, 202);
+    random.enqueue_skill_target_choices([SkillTargetChoice {
+        skill_id: 30030111,
+        source_uid: 10,
+        target_code: 202,
+        targets: vec![-1, -2],
+        additional_targets: vec![],
+        crit_targets: vec![],
+        additional_crit_targets: vec![],
+    }]);
+    let before = [managers.hp.current(-1), managers.hp.current(-2)];
+    let mut invocation: SkillInvocation = SkillRequest {
+        source_uid: 10,
+        skill_id: 30030111,
+    }
+    .into();
+    invocation.mode = crate::engine::skill::action::SkillExecutionMode::Active;
+    invocation.target = SkillTarget::Explicit(-1);
+    drain::run_skill(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        TargetContext {
+            current_round: 1,
+            ..Default::default()
+        },
+        invocation,
+        SkillModifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(before[0] - managers.hp.current(-1), 110);
+    assert_eq!(before[1] - managers.hp.current(-2), 125);
+}
+
+#[test]
+fn royal_horseshoe_reduces_enemy_ultimate_real_damage_only_in_rouge() {
+    use crate::engine::runtime::determinism::SkillTargetChoice;
+
+    fn damage(context: Option<RougeContext>, skill_id: i32) -> i32 {
+        let (mut managers, pool, mut catalog, mut random) = fixture(context);
+        catalog.insert(ParsedSkillEffect {
+            skill_id,
+            slots: vec![],
+        });
+        catalog.insert_damage_rate(skill_id, 1000);
+        catalog.insert_logic_target(skill_id, 1);
+        catalog.insert_effect_tag(skill_id, 1);
+        let before = managers.hp.current(10);
+        let mut invocation: SkillInvocation = SkillRequest {
+            source_uid: -1,
+            skill_id,
+        }
+        .into();
+        invocation.mode = crate::engine::skill::action::SkillExecutionMode::Active;
+        invocation.target = SkillTarget::Explicit(10);
+        drain::run_skill(
+            &mut managers,
+            &pool,
+            &catalog,
+            &mut random,
+            TargetContext {
+                current_round: 1,
+                ..Default::default()
+            },
+            invocation,
+            SkillModifiers::default(),
+        )
+        .unwrap();
+        assert_eq!(managers.attribute.get(10, AttrId::DmgTakenReduction), 0);
+        before - managers.hp.current(10)
+    }
+    assert_eq!(damage(Some(context(&[8120216])), 30030131), 80);
+    assert_eq!(damage(Some(context(&[8120216])), 30030111), 100);
+    assert_eq!(damage(None, 30030131), 100);
+
+    let (mut managers, pool, mut catalog, mut random) = fixture(Some(context(&[8120216])));
+    assert!(target_defense_attributes(&managers, &pool, -1, -2, true).is_empty());
+    assert!(target_defense_attributes(&managers, &pool, 10, 11, true).is_empty());
+    assert!(target_defense_attributes(&managers, &pool, -1, 10, false).is_empty());
+    assert_eq!(
+        target_defense_attributes(&managers, &pool, -1, 10, true),
+        vec![(AttrId::DmgTakenReduction, 200)]
+    );
+    catalog.insert(ParsedSkillEffect {
+        skill_id: 30030131,
+        slots: vec![],
+    });
+    catalog.insert_damage_rate(30030131, 1000);
+    catalog.insert_logic_target(30030131, 202);
+    catalog.insert_effect_tag(30030131, 1);
+    random.enqueue_skill_target_choices([SkillTargetChoice {
+        skill_id: 30030131,
+        source_uid: -1,
+        target_code: 202,
+        targets: vec![10, 11],
+        additional_targets: vec![],
+        crit_targets: vec![],
+        additional_crit_targets: vec![],
+    }]);
+    let before = [managers.hp.current(10), managers.hp.current(11)];
+    let mut invocation: SkillInvocation = SkillRequest {
+        source_uid: -1,
+        skill_id: 30030131,
+    }
+    .into();
+    invocation.mode = crate::engine::skill::action::SkillExecutionMode::Active;
+    invocation.target = SkillTarget::Explicit(10);
+    drain::run_skill(
+        &mut managers,
+        &pool,
+        &catalog,
+        &mut random,
+        TargetContext {
+            current_round: 1,
+            ..Default::default()
+        },
+        invocation,
+        SkillModifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(before[0] - managers.hp.current(10), 80);
+    assert_eq!(before[1] - managers.hp.current(11), 80);
+}

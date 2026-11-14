@@ -53,6 +53,65 @@ pub(super) fn completed_action(
         .cloned()
         .collect::<Vec<_>>();
     let ultimate = managers.catalog().skill_is_big(action.skill_id);
+    let mut ops = Vec::new();
+    if ultimate && pool.source_is_attacker(action.source_uid) {
+        // Lyrical Lance keeps permanent Ceremonious stacks per artefact UID.
+        // Growth from confirmed enemy kills is applied before the award for
+        // this ultimate; this ordering is a local interpretation. Only the
+        // new stacks are reported; the frozen baseline is not granted twice.
+        let lance_items = context
+            .artefacts
+            .iter()
+            .filter(|item| {
+                item.item_id == 8210209
+                    && sources
+                        .iter()
+                        .any(|source| source.uid == item.uid && source.item_id == item.item_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let frozen = context.permanent_growth.clone();
+        for item in lance_items {
+            let baseline = frozen
+                .get(&item.uid)
+                .and_then(|values| values.get("ritual_stacks"))
+                .copied()
+                .unwrap_or_default()
+                .clamp(0, 10);
+            let state = managers.rouge.active.as_mut().unwrap();
+            let prior = state
+                .counters
+                .get(&item.uid)
+                .and_then(|values| values.get("ritual_stacks"))
+                .copied()
+                .unwrap_or_default()
+                .clamp(0, 10 - baseline);
+            let new_stacks = action.enemy_kill_count.max(0).min(10 - baseline - prior);
+            let total = prior.saturating_add(new_stacks);
+            if new_stacks > 0 {
+                state
+                    .counters
+                    .entry(item.uid)
+                    .or_default()
+                    .insert("ritual_stacks".to_owned(), total);
+            }
+            let chance = item.proc_chance(500_i32.saturating_add(item.count4.saturating_mul(10)));
+            if determinism.roll_permille(chance) {
+                let amount = 2_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(baseline)
+                    .saturating_add(total)
+                    .clamp(0, 100);
+                if amount > 0 {
+                    for entity in &pool.attacker_main {
+                        if managers.hp.current(entity.uid) > 0 {
+                            ops.push(grant_stacks(action.source_uid, entity.uid, 90091, amount));
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !ultimate && matches!(action.rank, 2 | 3) {
         for source in sources.iter().filter(|source| {
             source.item_id == 8320310 && source.actor_uids.contains(&action.source_uid)
@@ -64,17 +123,8 @@ pub(super) fn completed_action(
             }
         }
     }
-    let Some(rules) = managers
-        .rouge
-        .context()
-        .and_then(|context| context.incantation_rules.clone())
-    else {
-        return vec![];
-    };
-    // Local timing policy: only actually completed, selected basic/Aid cards
-    // count. Ultimates, passive/extra actions and unexecuted queued cards do
-    // not fabricate syntony or permanent growth. A new level benefits later
-    // actions, not the action which has already completed.
+    // A selected rank-two or rank-three spell triggers the claw even if
+    // syntony has not been unlocked. Queued or failed cards do not.
     let selected = action.card_index > 0
         && managers.card.played().iter().any(|played| {
             played.card_index == action.card_index
@@ -89,15 +139,89 @@ pub(super) fn completed_action(
                                 || owner.skill_group2.contains(&action.skill_id)
                         })))
         });
-    if !selected
-        || ultimate
-        || crate::engine::skill::action::performs_extra_action(
-            action.card_index,
-            action.mode,
-            action.extra_skill_kind,
-        )
+    let extra = crate::engine::skill::action::performs_extra_action(
+        action.card_index,
+        action.mode,
+        action.extra_skill_kind,
+    );
+    let items = managers
+        .rouge
+        .context()
+        .map(|c| c.artefacts.clone())
+        .unwrap_or_default();
+    if selected
+        && !ultimate
+        && !extra
+        && matches!(action.rank, 2 | 3)
+        && managers.entity.team_type(action.source_uid) == Some(1)
     {
-        return vec![];
+        for _ in items.iter().filter(|item| item.item_id == 8310510) {
+            ops.extend(super::catalyst::coin_change(managers, 5));
+            if managers.hp.current(action.source_uid) > 0 {
+                ops.push(grant_stacks(action.source_uid, action.source_uid, 90021, 2));
+            }
+        }
+    }
+    // Cross-round triggers are recorded on the actual completed card,
+    // separately from current-round level calculation. Quotas count successful
+    // triggers, not failed probability rolls.
+    let played = action.card_index > 0
+        && managers.card.played().iter().any(|card| {
+            card.card_index == action.card_index
+                && card.caster_uid == action.source_uid
+                && card.skill_id == action.skill_id
+        });
+    let aid = super::is_support_card(
+        managers,
+        action.source_uid,
+        action.skill_id,
+        action.card_index,
+    );
+    if played && !extra && managers.entity.team_type(action.source_uid) == Some(1) {
+        for item in &items {
+            if item.item_id == 8220409 && aid {
+                let limit = 2_i32
+                    .saturating_add(item.count4)
+                    .saturating_add(if item.syntony_in_range_count > 0 {
+                        2
+                    } else {
+                        0
+                    })
+                    .max(0);
+                if quota_available(managers, item.uid, 8220409, limit)
+                    && determinism.roll_permille(
+                        item.proc_chance(600_i32.saturating_add(item.count2.saturating_mul(10))),
+                    )
+                {
+                    queue_syntony_bonus(managers, item.uid, 8220409, 1);
+                }
+            } else if item.item_id == 8310407 && aid {
+                let limit = if item.support_in_range_count >= 4 {
+                    i32::MAX
+                } else {
+                    5
+                };
+                if quota_available(managers, item.uid, 83104071, limit) {
+                    queue_syntony_bonus(managers, item.uid, 83104071, 1);
+                }
+            } else if item.item_id == 8320408 && ultimate {
+                let amount = 1_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(i32::from(item.syntony_in_range_count >= 4))
+                    .max(0);
+                queue_syntony_bonus(managers, item.uid, 8320408, amount);
+            }
+        }
+    }
+    let Some(rules) = managers
+        .rouge
+        .context()
+        .and_then(|c| c.incantation_rules.clone())
+    else {
+        return ops;
+    };
+    if !selected || ultimate || extra {
+        return ops;
     }
     // Reality/Mental are both the Attack card type. `skill_type` is the
     // active/passive discriminator and is not the syntony category.
@@ -107,19 +231,21 @@ pub(super) fn completed_action(
     };
     // These seven types are the shipped base polarization table's keys.
     if !matches!(kind, 1 | 3 | 4 | 5 | 6 | 8 | 9) {
-        return vec![];
+        return ops;
     }
-    let bonuses = super::catalyst::level_bonus(managers);
+    let mut bonuses = super::catalyst::level_bonus(managers);
+    bonuses.0 = bonuses.0.saturating_add(
+        managers
+            .rouge
+            .active
+            .as_ref()
+            .map_or(0, |state| state.current_syntony_bonus),
+    );
     let style = managers
         .rouge
         .context()
         .and_then(|context| context.catalyst.as_ref())
         .map_or(0, |catalyst| catalyst.style_id);
-    let items = managers
-        .rouge
-        .context()
-        .map(|context| context.artefacts.clone())
-        .unwrap_or_default();
     let state = managers.rouge.active.as_mut().unwrap();
     let incantation = &mut state.incantation;
     let count = incantation.casts_by_type.entry(kind).or_default();
@@ -148,7 +274,6 @@ pub(super) fn completed_action(
     incantation.resonance_level = new_resonance;
     state.summary.resonance_max_level = state.summary.resonance_max_level.max(new_resonance);
 
-    let mut ops = Vec::new();
     let target = pool
         .attacker_main
         .first()
@@ -186,6 +311,69 @@ pub(super) fn completed_action(
             ops.push(super::grant(allies[index], allies[index], 90331));
         }
     }
+    // The Eye has two independent once-per-fight grants. Both thresholds
+    // fire when a catalyst raises the first trigger directly to level three.
+    for item in items.iter().filter(|item| item.item_id == 8210411) {
+        let thresholds = [
+            (
+                old_syntony < 2 && new_syntony >= 2 && item.syntony_in_range,
+                82104112,
+                6,
+            ),
+            (
+                old_syntony < 3 && new_syntony >= 3,
+                82104113,
+                9_i32.saturating_add(item.count2).max(0),
+            ),
+        ];
+        for (trigger, key, amount) in thresholds {
+            if trigger
+                && managers
+                    .rouge
+                    .active
+                    .as_mut()
+                    .unwrap()
+                    .growth_triggers
+                    .insert((item.uid, 0, key))
+            {
+                for entity in &pool.attacker_main {
+                    if managers.hp.current(entity.uid) > 0 {
+                        ops.push(grant_stacks(action.source_uid, entity.uid, 90001, amount));
+                    }
+                }
+            }
+        }
+    }
+    if old_syntony < 2 && new_syntony >= 2 {
+        for item in items.iter().filter(|item| item.item_id == 8310407) {
+            let limit = if item.support_in_range_count >= 4 {
+                i32::MAX
+            } else {
+                5
+            };
+            if quota_available(managers, item.uid, 83104072, limit)
+                && determinism.roll_permille(
+                    item.proc_chance(400_i32.saturating_add(item.count2.saturating_mul(10))),
+                )
+            {
+                increment_quota(managers, item.uid, 83104072);
+                for entity in &pool.attacker_main {
+                    if managers.hp.current(entity.uid) > 0 {
+                        ops.push(grant_stacks(entity.uid, entity.uid, 90001, 12));
+                    }
+                }
+            }
+        }
+    }
+    if old_syntony < 5 && new_syntony >= 5 {
+        for _ in items.iter().filter(|item| item.item_id == 8320408) {
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    ops.push(grant_stacks(entity.uid, entity.uid, 90201, 1));
+                }
+            }
+        }
+    }
     if old_syntony < 2 && new_syntony >= 2 {
         for item in &items {
             match item.item_id {
@@ -218,6 +406,76 @@ pub(super) fn completed_action(
         }
     }
     if new_syntony > old_syntony {
+        for item in items.iter().filter(|item| item.item_id == 8110410) {
+            let chance = item.proc_chance(500_i32.saturating_add(item.count2.saturating_mul(10)));
+            if determinism.roll_permille(chance) {
+                for enemy in &pool.defender_main {
+                    if managers.hp.current(enemy.uid) > 0 {
+                        ops.push(grant_stacks(action.source_uid, enemy.uid, 90061, 2));
+                    }
+                }
+            }
+        }
+    }
+    if new_syntony > old_syntony {
+        // Multiple copies resolve in UID order, using each enemy's remaining
+        // HP after earlier queued copies (local sequential-stacking policy).
+        let mut sources: Vec<_> = items
+            .iter()
+            .filter(|item| item.item_id == 8330413)
+            .collect();
+        sources.sort_unstable_by_key(|item| item.uid);
+        for enemy in &pool.defender_main {
+            let mut remaining = managers.hp.current(enemy.uid).max(0);
+            for _ in &sources {
+                let amount = (i64::from(remaining) * 50 / 1000) as i32;
+                if amount <= 0 {
+                    break;
+                }
+                remaining = remaining.saturating_sub(amount);
+                ops.push(RuleOp::Command(BattleCommand::Hp(
+                    crate::engine::manager::hp::HpCommand::Lose(
+                        crate::engine::manager::hp::HpLoss {
+                            origin: ORIGIN,
+                            source_uid: enemy.uid,
+                            target_uid: enemy.uid,
+                            amount,
+                            config_effect: 0,
+                            hurt: None,
+                        },
+                    ),
+                )));
+            }
+        }
+    }
+    if new_syntony > old_syntony {
+        for _ in items.iter().filter(|item| item.item_id == 8330412) {
+            // Stable slot order breaks equal effective-attack ties locally.
+            let best = pool
+                .attacker_main
+                .iter()
+                .filter(|e| managers.hp.current(e.uid) > 0)
+                .enumerate()
+                .max_by_key(|(i, e)| {
+                    (
+                        managers.origin_attribute(e.uid, AttrId::Attack),
+                        std::cmp::Reverse(*i),
+                    )
+                })
+                .map(|(_, e)| e.uid);
+            if let Some(uid) = best {
+                ops.push(grant_stacks(uid, uid, 500212, 1));
+            }
+            if old_syntony < 3 && new_syntony >= 3 {
+                for entity in &pool.attacker_main {
+                    if managers.hp.current(entity.uid) > 0 {
+                        ops.push(grant_stacks(entity.uid, entity.uid, 500212, 1));
+                    }
+                }
+            }
+        }
+    }
+    if new_syntony > old_syntony {
         for _ in items.iter().filter(|item| item.item_id == 8130404) {
             let enemies = pool
                 .defender_main
@@ -227,6 +485,41 @@ pub(super) fn completed_action(
                 .collect::<Vec<_>>();
             if let Some(index) = determinism.lua_random_index(enemies.len()) {
                 ops.push(grant_stacks(action.source_uid, enemies[index], 90101, 10));
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for item in items.iter().filter(|item| item.item_id == 8120512) {
+            let chance = item.proc_chance(500_i32.saturating_add(item.count2.saturating_mul(10)));
+            if determinism.roll_permille(chance) {
+                for ally in &pool.attacker_main {
+                    if managers.hp.current(ally.uid) > 0 {
+                        ops.push(grant_stacks(action.source_uid, ally.uid, 90021, 2));
+                    }
+                }
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for item in items.iter().filter(|item| item.item_id == 8210508) {
+            let amount = 2_i32
+                .saturating_add(item.count4)
+                .saturating_add(i32::from(item.non_resonance_in_range))
+                .max(0);
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    ops.push(grant_stacks(action.source_uid, entity.uid, 90021, amount));
+                }
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for _ in items.iter().filter(|item| item.item_id == 8320709) {
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    ops.push(grant_stacks(entity.uid, entity.uid, 90021, 1));
+                    ops.push(grant_stacks(entity.uid, entity.uid, 91210030, 1));
+                }
             }
         }
     }
@@ -241,10 +534,330 @@ pub(super) fn completed_action(
             }
         }
     }
+
+    if new_syntony > old_syntony {
+        for _ in items.iter().filter(|item| item.item_id == 8120416) {
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    ops.push(grant_stacks(entity.uid, entity.uid, 90031, 5));
+                    ops.push(grant_stacks(entity.uid, entity.uid, 90032, 5));
+                }
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for item in &items {
+            if item.item_id == 8130505 {
+                for entity in &pool.defender_main {
+                    if managers.hp.current(entity.uid) > 0 {
+                        ops.push(grant_stacks(action.source_uid, entity.uid, 4150001, 10));
+                    }
+                }
+            } else if item.item_id == 8330513 {
+                let crossed_two = old_resonance < 2 && new_resonance >= 2;
+                let count = if crossed_two { 4 } else { 2 };
+                if crossed_two {
+                    use crate::engine::manager::buff::{BuffConsume, BuffSelector, DepletedBuff};
+                    for enemy in &pool.defender_main {
+                        if managers.hp.current(enemy.uid) > 0 {
+                            ops.push(RuleOp::Command(BattleCommand::Buff(
+                                BuffCommand::ConsumeCoalesced(BuffConsume {
+                                    origin: ORIGIN,
+                                    target_uid: enemy.uid,
+                                    selector: BuffSelector::ExactId(90021),
+                                    amount: 2,
+                                    depleted: DepletedBuff::Remove,
+                                }),
+                            )));
+                        }
+                    }
+                }
+                for entity in &pool.attacker_main {
+                    if managers.hp.current(entity.uid) > 0 {
+                        ops.push(grant_stacks(entity.uid, entity.uid, 90021, count));
+                    }
+                }
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for item in items.iter().filter(|item| item.item_id == 8210105) {
+            let chance = item.proc_chance(500_i32.saturating_add(item.count2.saturating_mul(10)));
+            if !determinism.roll_permille(chance) {
+                continue;
+            }
+            let allies: Vec<_> = pool
+                .attacker_main
+                .iter()
+                .filter(|e| managers.hp.current(e.uid) > 0)
+                .map(|e| e.uid)
+                .collect();
+            if let Some(index) = determinism.lua_random_index(allies.len()) {
+                let uid = allies[index];
+                // Current client carrier IDs: one-round Empower I/II and
+                // next-round rank-1/2 Support anticipation respectively.
+                let (empower, support) = if item.non_support_in_range {
+                    (5024, 90332)
+                } else {
+                    (5021, 90331)
+                };
+                ops.push(grant_stacks(uid, uid, empower, 1));
+                ops.push(grant_stacks(uid, uid, support, 1));
+            }
+        }
+    }
+    if new_resonance > old_resonance {
+        for item in items.iter().filter(|item| item.item_id == 8320514) {
+            // The group matches the current client status family. Four-turn
+            // variants are unavailable for four families, so those cap at 3.
+            // Immunity to four statuses remains a separate unimplemented part.
+            const GROUPS: [&[i32]; 5] = [
+                &[90061, 90062, 90063],
+                &[90231, 90232, 90233],
+                &[90151, 90152, 90153, 90154],
+                &[90221, 90222, 90223],
+                &[90161, 90162, 90163],
+            ];
+            // Multiple skills and durations can use different buff IDs for
+            // the same status; compare the client status type instead.
+            const TYPES: [i32; 5] = [90061, 3120001, 6003, 6004, 6002];
+            let duration = 1_i32
+                .saturating_add(item.count2)
+                .saturating_add(i32::from(item.non_resonance_in_range))
+                .max(1) as usize;
+            for enemy in &pool.defender_main {
+                if managers.hp.current(enemy.uid) <= 0 {
+                    continue;
+                }
+                let missing: Vec<usize> = GROUPS
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, _ids)| {
+                        (!lantern_status_present(managers, enemy.uid, TYPES[index], &ops))
+                            .then_some(index)
+                    })
+                    .collect();
+                let candidates: Vec<usize> = if missing.is_empty() {
+                    (0..GROUPS.len()).collect()
+                } else {
+                    missing
+                };
+                if let Some(index) = determinism.lua_random_index(candidates.len()) {
+                    let group = GROUPS[candidates[index]];
+                    ops.push(grant_stacks(
+                        action.source_uid,
+                        enemy.uid,
+                        group[duration.min(group.len()) - 1],
+                        1,
+                    ));
+                }
+            }
+        }
+    }
+    let mut next_ap = 0_i32;
+    if new_syntony > old_syntony {
+        next_ap = next_ap.saturating_add(
+            items
+                .iter()
+                .filter(|item| matches!(item.item_id, 8230414 | 8330417))
+                .count()
+                .min(i32::MAX as usize) as i32,
+        );
+    }
+    if new_resonance > old_resonance {
+        next_ap = next_ap.saturating_add(
+            items
+                .iter()
+                .filter(|item| matches!(item.item_id, 8230509 | 8330417))
+                .count()
+                .min(i32::MAX as usize) as i32,
+        );
+    }
+    super::queue_next_round_action_points(managers, next_ap);
+    // Resonance random buffs share the same pending-buff view, so a later
+    // source still prefers effects that earlier queued draws have not granted.
+    if new_resonance > old_resonance {
+        for item in &items {
+            let draws = match item.item_id {
+                8130503 if old_resonance < 2 && new_resonance >= 2 => 1,
+                8130504 => 1,
+                8220516 => 1_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(i32::from(item.non_resonance_in_range)),
+                8320511 => 1_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(item.resonance_artefact_count),
+                _ => continue,
+            }
+            .clamp(0, 1024) as usize;
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    let extra = super::artefact_turns::permanent_buffs_with_pending(
+                        managers,
+                        entity.uid,
+                        draws,
+                        determinism,
+                        &ops,
+                    );
+                    ops.extend(extra);
+                }
+            }
+        }
+    }
+    // Each bomb has independent once-per-fight syntony and resonance grants.
+    // Counters are replayed with the battle and never reset between rounds.
+    for item in &items {
+        if item.item_id == 8230614 {
+            for (triggered, key) in [
+                (new_syntony > old_syntony, 61001),
+                (new_resonance > old_resonance, 61002),
+            ] {
+                if triggered
+                    && managers
+                        .rouge
+                        .active
+                        .as_mut()
+                        .unwrap()
+                        .growth_triggers
+                        .insert((item.uid, 0, key))
+                {
+                    ops.extend(super::catalyst::coin_change(managers, 20));
+                }
+            }
+        } else if item.item_id == 8310510 && new_resonance > old_resonance {
+            ops.extend(super::catalyst::coin_change(
+                managers,
+                5_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(if item.non_resonance_in_range { 5 } else { 0 }),
+            ));
+            for entity in &pool.attacker_main {
+                if managers.hp.current(entity.uid) > 0 {
+                    ops.push(grant_stacks(action.source_uid, entity.uid, 90021, 1));
+                }
+            }
+        }
+    }
+
     if new_syntony > old_syntony || new_resonance > old_resonance {
         update_round_attributes(managers, pool);
     }
     ops
+}
+
+/// Observe actual committed bullet count changes, not casts or previews.
+/// The last observed amount suppresses duplicate/stale notifications while an
+/// intervening real refill resets the observed level for subsequent losses.
+pub(super) fn observe_bullet_change(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    event: &BattleEvent,
+    determinism: &mut crate::engine::runtime::determinism::RoundDeterminism,
+) {
+    let (change, added) = match event {
+        BattleEvent::BuffAdded(change) => (change, true),
+        BattleEvent::BuffChanged(change) | BattleEvent::BuffRemoved(change) => (change, false),
+        _ => return,
+    };
+    if !pool.source_is_attacker(change.target_uid)
+        || change.buff_uid == 0
+        || !managers
+            .catalog()
+            .buff_features(change.buff_id)
+            .iter()
+            .any(|feature| feature.values.first() == Some(&827))
+    {
+        return;
+    }
+    let Some(state) = managers.rouge.active.as_mut() else {
+        return;
+    };
+    if added {
+        state
+            .bullet_observed_amounts
+            .insert(change.buff_uid, change.after_amount);
+        return;
+    }
+    if let Some(previous) = state.bullet_observed_amounts.get(&change.buff_uid) {
+        if *previous != change.before_amount {
+            return;
+        }
+    }
+    state
+        .bullet_observed_amounts
+        .insert(change.buff_uid, change.after_amount);
+    let lost = change
+        .before_amount
+        .saturating_sub(change.after_amount)
+        .max(0);
+    if lost == 0 || managers.hp.current(change.target_uid) <= 0 {
+        return;
+    }
+    let items = managers
+        .rouge
+        .context()
+        .map(|c| c.artefacts.clone())
+        .unwrap_or_default();
+    for item in items.iter().filter(|item| item.item_id == 8220415) {
+        let limit = 2_i32
+            .saturating_add(item.count4)
+            .saturating_add(if item.syntony_in_range_count > 0 {
+                2
+            } else {
+                0
+            })
+            .max(0);
+        for _ in 0..lost.min(100) {
+            if !quota_available(managers, item.uid, 8220415, limit) {
+                break;
+            }
+            if determinism.roll_permille(
+                item.proc_chance(800_i32.saturating_add(item.count2.saturating_mul(10))),
+            ) {
+                queue_syntony_bonus(managers, item.uid, 8220415, 1);
+            }
+        }
+    }
+}
+
+fn quota_available(managers: &BattleManagers, uid: i64, key: i32, limit: i32) -> bool {
+    managers
+        .rouge
+        .active
+        .as_ref()
+        .and_then(|s| s.artefact_trigger_counts.get(&(uid, key)))
+        .copied()
+        .unwrap_or_default()
+        < limit
+}
+fn increment_quota(managers: &mut BattleManagers, uid: i64, key: i32) {
+    if let Some(state) = managers.rouge.active.as_mut() {
+        let count = state.artefact_trigger_counts.entry((uid, key)).or_default();
+        *count = count.saturating_add(1);
+    }
+}
+fn queue_syntony_bonus(managers: &mut BattleManagers, uid: i64, key: i32, amount: i32) {
+    if let Some(state) = managers.rouge.active.as_mut() {
+        let count = state.artefact_trigger_counts.entry((uid, key)).or_default();
+        *count = count.saturating_add(1);
+        state.next_syntony_bonus = state.next_syntony_bonus.saturating_add(amount.max(0));
+    }
+}
+
+/// Both active statuses and queued grants are matched by the client's type.
+pub(super) fn lantern_status_present(
+    managers: &BattleManagers,
+    uid: i64,
+    type_id: i32,
+    pending: &[RuleOp],
+) -> bool {
+    managers.buff.has_active_buff_id_or_type(uid, type_id)
+        || pending.iter().any(|op| {
+            matches!(op,
+            RuleOp::Command(BattleCommand::Buff(BuffCommand::Grant(grant)))
+                if grant.target_uid == uid
+                    && managers.catalog().buff_type_id(grant.buff_id) == type_id)
+        })
 }
 
 fn grant_stacks(source_uid: i64, target_uid: i64, buff_id: i32, amount: i32) -> RuleOp {
@@ -371,6 +984,7 @@ pub(crate) fn end_round(managers: &mut BattleManagers) {
         return;
     };
     let previous = std::mem::take(&mut state.incantation);
+    state.current_syntony_bonus = std::mem::take(&mut state.next_syntony_bonus);
     for ((uid, raw), value) in previous.attributes {
         if let Some(attr) = AttrId::from_raw(raw) {
             managers.attribute.add(uid, attr, value.saturating_neg());

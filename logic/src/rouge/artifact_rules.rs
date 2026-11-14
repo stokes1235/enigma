@@ -83,7 +83,9 @@ pub struct MapState {
     /// Per-instance permanent stat rates, applied only while that item is active.
     /// A combat adapter may persist verified growth here after battle settlement.
     pub permanent_rates: BTreeMap<i64, BTreeMap<i32, i32>>,
-    /// Per-fight cumulative NEW growth already merged, in percentage points.
+    /// Per-instance extra Ceremonious stacks, distinct from percentage growth.
+    pub permanent_ritual_stacks: BTreeMap<i64, i32>,
+    /// Per-fight cumulative NEW growth already merged, in the item's units.
     /// Fight identity and item UID prevent replay/reconnect double credit.
     pub battle_growth: BTreeMap<i64, BTreeMap<i64, i32>>,
 }
@@ -144,6 +146,18 @@ pub fn collection_tags(item_id: i32) -> &'static [i32] {
     geometry::get(item_id).map(|meta| meta.tags).unwrap_or(&[])
 }
 
+/// Telescopes affect only physically placed extra-action-tagged artefacts.
+/// Range belongs to each telescope, not to the target's own effect area.
+pub fn telescope_count_covering(target: &BagItem, bag: &RunBag) -> i32 {
+    if !is_active(target) || !has_tag(target, 7) {
+        return 0;
+    }
+    bag.items
+        .iter()
+        .filter(|scope| scope.item_id == 8320707 && within_range(scope, target))
+        .count() as i32
+}
+
 pub fn count_tag_in_range(source: &BagItem, bag: &RunBag, tag: i32) -> i32 {
     bag.items
         .iter()
@@ -193,6 +207,33 @@ pub fn only_support_below(source: &BagItem, bag: &RunBag) -> bool {
                 .iter()
                 .all(|tag| *tag >= 100 || *tag == 1)
         })
+}
+
+/// Count physical Support-tagged neighbours along the same rotated lower edge
+/// used by `only_support_below`; inlay tags count, the inlay itself does not.
+pub fn support_below_count(source: &BagItem, bag: &RunBag) -> i32 {
+    if !active(source) {
+        return 0;
+    }
+    let occupied = occupied_cells(source);
+    let below: BTreeSet<_> = occupied
+        .iter()
+        .map(|(row, col)| (row + 1, *col))
+        .filter(|cell| !occupied.contains(cell))
+        .collect();
+    i32::try_from(
+        bag.items
+            .iter()
+            .filter(|other| active(other) && other.uid != source.uid)
+            .filter(|other| effective_tags(other).contains(&1))
+            .filter(|other| {
+                occupied_cells(other)
+                    .iter()
+                    .any(|cell| below.contains(cell))
+            })
+            .count(),
+    )
+    .unwrap_or(i32::MAX)
 }
 
 /// Layout energy is supplied by surrounding winders; inserted Disks do not
@@ -371,7 +412,7 @@ pub fn evaluate_battle_with_state(
             8110312 | 8210313 | 8230305 | 8330306 | 8310706 | 8210712 => {}
             8310108 => result.unsupported.push(unsupported(
                 item,
-                "Aid-cast damage supported; kill-triggered power still needs combat support",
+                "Aid-cast damage and kill power supported; below-layout bonus scope is locally inferred",
             )),
             8230019 => {
                 result.sale_discount_bonus_per_mille += 200;
@@ -397,7 +438,7 @@ pub fn evaluate_battle_with_state(
                 );
                 result.unsupported.push(unsupported(
                     item,
-                    "round-start Reflect and conditional wound/bleed leech need combat support",
+                    "round-start Reflect and wound/bleed leech supported; reflection carrier and shield basis are locally inferred",
                 ));
             }
             8310206 => add_rate(
@@ -479,7 +520,7 @@ pub fn evaluate_battle_with_state(
                 // Rouge battle context now applies it to the Genesis formula.
                 result.unsupported.push(unsupported(
                     item,
-                    "random negative statuses at round start need a combat trigger",
+                    "round-start negative statuses supported; mixed-item selection and status variants remain approximate",
                 ));
             }
             8330218 => add_rate(&mut result, 214, disks * 20),
@@ -503,10 +544,9 @@ pub fn evaluate_battle_with_state(
                 item,
                 "acquisition coins supported; storm region substitution needs combat support",
             )),
-            8210711 => result.unsupported.push(unsupported(
-                item,
-                "Bullet damage supported; the extra-action chance still needs combat support",
-            )),
+            // Held-Bullet and probabilistic extra-action bonuses are both
+            // applied by the battle engine to the current execution only.
+            8210711 => {},
             8330710 => result.unsupported.push(unsupported(
                 item,
                 "round-start Schemed supported; storm region replacement is pending",
@@ -1026,7 +1066,7 @@ mod tests {
             vec![UnsupportedEffect {
                 uid: 1,
                 item_id: 8330020,
-                reason: "random negative statuses at round start need a combat trigger",
+                reason: "round-start negative statuses supported; mixed-item selection and status variants remain approximate",
             }]
         );
     }
@@ -1529,6 +1569,29 @@ mod tests {
     }
 
     #[test]
+    fn support_below_count_uses_physical_neighbors_and_effective_inlays() {
+        let source = item(1, 8210113, 3, 3);
+        let below = item(2, 8140101, 4, 3);
+        let above = item(3, 8140101, 2, 3);
+        let stored = item(4, 8140101, -1, -1);
+        assert_eq!(
+            support_below_count(&source, &bag(vec![source.clone(), below, above, stored])),
+            1
+        );
+        let mut host = item(5, 8110021, 4, 3);
+        host.holes = vec![8140101];
+        assert_eq!(
+            support_below_count(&source, &bag(vec![source.clone(), host])),
+            1,
+            "a support inlay tags its placed host without counting as a second item"
+        );
+        assert_eq!(
+            support_below_count(&item(1, 8210113, -1, -1), &bag(vec![])),
+            0
+        );
+    }
+
+    #[test]
     fn support_below_uses_adjacent_lower_cells_and_ignores_category_tags() {
         let source = item(1, 8210113, 3, 3);
         assert!(
@@ -1650,5 +1713,25 @@ mod tests {
         assert_eq!(layout_energy(&target, &layout), 1);
         assert_eq!(layout_energy(&item(4, 8140101, 3, 4), &layout), 0);
         assert_eq!(layout_energy(&item(5, 8140801, -1, -1), &layout), 0);
+    }
+    #[test]
+    fn telescopes_use_real_rotated_coverage_and_inlaid_mechanic_tags() {
+        let left = item(1, 8320707, 2, 1);
+        let right = item(2, 8320707, 2, 4);
+        let mut target = item(3, 8310405, 2, 3);
+        let mut layout = bag(vec![left, right, target.clone()]);
+        assert_eq!(telescope_count_covering(&target, &layout), 0);
+        target.holes = vec![8140701];
+        target.hole_ids = vec![4];
+        layout.items[2] = target.clone();
+        assert_eq!(telescope_count_covering(&target, &layout), 2);
+        layout.items[0].rotation = 4; // invalid rotations never contribute.
+        assert_eq!(telescope_count_covering(&target, &layout), 1);
+        layout.items[1].row = -1;
+        layout.items[1].col = -1;
+        assert_eq!(telescope_count_covering(&target, &layout), 0);
+        target.row = -1;
+        target.col = -1;
+        assert_eq!(telescope_count_covering(&target, &layout), 0);
     }
 }

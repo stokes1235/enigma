@@ -1,11 +1,12 @@
 //! Frozen base-Rouge difficulty, including enemies registered after opening.
-//! No HP curve or unexported per-step scaling is synthesized here.
+//! The frozen local HP/step approximation also applies to later waves.
 
 use super::*;
 use crate::engine::{
     manager::card::{CardCommand, CardEnchantHand, EnchantedType},
     runtime::determinism::RoundDeterminism,
 };
+use sonettobuf::FightEntityInfo;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -50,6 +51,23 @@ fn scale(value: &mut Option<i32>, rate: i32) {
     }
 }
 
+fn scale_current_hp(entity: &mut FightEntityInfo, old_max: Option<i32>, rate: i32) {
+    if rate == 0 {
+        return;
+    }
+    match (
+        old_max,
+        entity.attr.as_ref().and_then(|attr| attr.hp),
+        entity.current_hp,
+    ) {
+        (Some(before), Some(after), Some(current)) if before > 0 => {
+            entity.current_hp =
+                Some(((current.clamp(0, before) as i64 * after as i64) / before as i64) as i32);
+        }
+        _ => scale(&mut entity.current_hp, rate),
+    }
+}
+
 /// Called after plain enemy registration and before its entry passives. Build
 /// the same static combat baseline as the initial Fight; a later round's5%
 /// growth therefore has the same basis on an opening enemy or a wave newcomer.
@@ -77,13 +95,21 @@ pub(crate) fn register_enemy(managers: &mut BattleManagers, uid: i64) {
     for (id, value) in profile.enemy_attributes {
         *rates.entry(id).or_default() += value;
     }
+    let old_max = entity.attr.as_ref().and_then(|attr| attr.hp);
     for attr in [&mut entity.attr, &mut entity.base_attr]
         .into_iter()
         .flatten()
     {
+        scale(&mut attr.hp, rates.get(&101).copied().unwrap_or(0));
         scale(&mut attr.attack, rates.get(&102).copied().unwrap_or(0));
         scale(&mut attr.defense, rates.get(&103).copied().unwrap_or(0));
         scale(&mut attr.mdefense, rates.get(&104).copied().unwrap_or(0));
+    }
+    scale_current_hp(&mut entity, old_max, rates.get(&101).copied().unwrap_or(0));
+    if rates.get(&101).copied().unwrap_or(0) != 0 {
+        // This is a newly registered enemy; rebuild its HP state from the
+        // scaled snapshot before entry passives can observe current/max HP.
+        managers.hp.register(&entity);
     }
     // register_with_catalog also initializes these six lanes. Preserve any
     // explicit values already seeded for the new enemy before rebasing stats.

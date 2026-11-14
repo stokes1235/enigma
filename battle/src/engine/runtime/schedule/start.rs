@@ -123,13 +123,13 @@ pub fn run_before_ai_round_start(
     debug_assert!(pending_settlement.capacity_groups.is_empty());
     debug_assert!(split_losses.frames.is_empty());
     if let Some(team) = action_phase_team {
-        let duration = drain::run(
+        let duration = run_round_start_durations(
             managers,
             pool,
             catalog,
             determinism,
             context,
-            round_start_duration_rules(&round_start_duration_snapshot),
+            &round_start_duration_snapshot,
         )?;
         let late_setup = drain::run_setup_stage_for_owners(
             managers,
@@ -299,26 +299,26 @@ pub fn run_round_start_after_ai_split(
         )?,
     );
     if setup_layout != Some(crate::engine::fight::versions::RoundStartSetupLayout::Version7) {
-        let duration = drain::run(
+        let duration = run_round_start_durations(
             managers,
             pool,
             catalog,
             determinism,
             context,
-            round_start_duration_rules(&round_start_duration_snapshot),
+            &round_start_duration_snapshot,
         )?;
         append_round_phase(&mut settlement, duration);
     }
     if version_seven {
         append_round_phase(
             &mut settlement,
-            drain::run(
+            run_round_start_durations(
                 managers,
                 pool,
                 catalog,
                 determinism,
                 context,
-                round_start_duration_rules(&round_start_duration_snapshot),
+                &round_start_duration_snapshot,
             )?,
         );
     }
@@ -612,6 +612,20 @@ fn duration_advance_rule(take_stage: i32, snapshot: &[(i64, i64)]) -> Option<Rul
     })
 }
 
+fn run_round_start_durations(
+    managers: &mut BattleManagers,
+    pool: &TargetPool,
+    catalog: &SkillEffectCatalog,
+    determinism: &mut RoundDeterminism,
+    context: TargetContext,
+    snapshot: &[(i64, i64)],
+) -> Result<DrainResult, DrainError> {
+    let mut ops =
+        crate::rouge::fade_before_duration(managers, effect_time::ROUND_START_DURATION, snapshot);
+    ops.extend(round_start_duration_rules(snapshot));
+    drain::run(managers, pool, catalog, determinism, context, ops)
+}
+
 fn round_start_duration_rules(snapshot: &[(i64, i64)]) -> impl Iterator<Item = RuleOp> + '_ {
     effect_time::ROUND_START_DURATION_STAGES
         .into_iter()
@@ -750,13 +764,13 @@ pub fn run_start(
                     .expect("opening schedule reaches round start before the buff gate");
                 append_round_phase(
                     &mut settlement,
-                    drain::run(
+                    run_round_start_durations(
                         managers,
                         pool,
                         catalog,
                         determinism,
                         context,
-                        round_start_duration_rules(&duration_snapshot),
+                        &duration_snapshot,
                     )?,
                 );
             }
@@ -1380,13 +1394,13 @@ fn run_round_start_before_duration(
     if !defer_round_start_duration {
         append_round_phase(
             &mut round_start_event,
-            drain::run(
+            run_round_start_durations(
                 managers,
                 pool,
                 catalog,
                 determinism,
                 context,
-                round_start_duration_rules(&duration_snapshot),
+                &duration_snapshot,
             )?,
         );
     }

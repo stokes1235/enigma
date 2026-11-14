@@ -16,6 +16,7 @@ use crate::engine::{
         card::{CardCommand, CardRefillOne},
         eureka::{EUREKA_RESOURCE_ID, EurekaChange, EurekaCommand},
         ex_point::{ExPointChange, ExPointCommand},
+        hp::{HpCommand, HpLoss},
         shield::{ShieldCarrierUid, ShieldCommand, ShieldScope},
     },
     skill::{
@@ -89,6 +90,11 @@ pub fn has_entry_effect(item_id: i32) -> bool {
             | 8230019
             | 8330607
             | 8120610
+            | 8130018
+            | 8320046
+            | 8330816
+            | 8330715
+            | 8330413
     )
 }
 
@@ -210,6 +216,72 @@ pub(crate) fn opening(
             continue;
         }
         match item.item_id {
+            8130018 => {
+                // Poison uses an allied source's ATK; the exact official
+                // caster for an artefact is not documented, so slot one is
+                // selected deterministically. Three-round poison is 90153.
+                let source = context
+                    .first_slot_uid
+                    .filter(|uid| allies.contains(uid))
+                    .unwrap_or(allies[0]);
+                let stacks = 1_i32
+                    .saturating_add(item.count2)
+                    .saturating_add(item.medication_in_range)
+                    .max(0);
+                for &uid in &enemies {
+                    ops.push(grant(source, uid, 90153, stacks));
+                }
+            }
+            8320046 => {
+                for &uid in &allies {
+                    ops.push(grant(uid, uid, 301, 4));
+                }
+                for &uid in &enemies {
+                    ops.push(grant(allies[0], uid, 5122, 1));
+                }
+            }
+            8330413 if context.present_danger => {
+                for &uid in &enemies {
+                    let max = managers.hp.get(uid).max.max(0);
+                    let amount = (i64::from(max) * 150 / 1000).min(i64::from(i32::MAX)) as i32;
+                    if amount > 0 {
+                        // The enemy loses its own HP directly. This is not a
+                        // player damage source and does not count for badges.
+                        ops.push(RuleOp::Command(BattleCommand::Hp(HpCommand::Lose(
+                            HpLoss {
+                                origin: ORIGIN,
+                                source_uid: uid,
+                                target_uid: uid,
+                                amount,
+                                config_effect: 0,
+                                hurt: None,
+                            },
+                        ))));
+                    }
+                }
+            }
+            8330715 => {
+                // The current client exports a nine-entry Bullet pool under
+                // 91130030. Its linkage to this artefact is not documented;
+                // use it as an explicit local approximation. Sample without
+                // replacement for each carrier, preserving five bullets.
+                for &uid in &allies {
+                    let mut bullets = (91130031..=91130039).collect::<Vec<_>>();
+                    for draw in 0..5 {
+                        let index = random_index(entry.seed, item.uid, uid, draw, bullets.len());
+                        ops.push(grant(uid, uid, bullets.remove(index), 1));
+                    }
+                }
+            }
+            8330816 => {
+                let uid = context
+                    .first_slot_uid
+                    .filter(|uid| allies.contains(uid))
+                    .unwrap_or(allies[0]);
+                if item.electric_artefact_count > 0 {
+                    ops.push(grant(uid, uid, 90071, item.electric_artefact_count));
+                }
+            }
             8140801 | 8240802 => {
                 let uid = allies[random_index(entry.seed, item.uid, 0, 0, allies.len())];
                 ops.push(grant(

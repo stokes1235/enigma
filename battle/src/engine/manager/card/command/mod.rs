@@ -28,6 +28,8 @@ pub enum TemporaryCardKind {
     ConfiguredSkill,
     ConfiguredSkill3,
     HeroSkill,
+    /// 3.9 Rouge catalyst adds an owner-attributed temporary normal card.
+    CatalystMasterSkill,
     SupportSkill,
 }
 
@@ -480,6 +482,7 @@ pub enum CardChangeKind {
     TemporaryAdded,
     ConfiguredSkill3Added,
     HeroTemporaryAdded,
+    CatalystMasterAdded,
     CrystalAdded,
     PrecastAdded,
     TemporaryChanged,
@@ -780,6 +783,22 @@ pub(super) fn execute(
                 TemporaryCardKind::SupportSkill => {
                     manager.add_support_card_for(add.target_uid, add.skill_id, add.hero_id.unwrap())
                 }
+                TemporaryCardKind::CatalystMasterSkill => {
+                    let hero_id = add
+                        .hero_id
+                        .filter(|id| *id > 0)
+                        .ok_or(CardCommandError::InvalidCommand)?;
+                    if add.target_uid == 0 {
+                        return Err(CardCommandError::InvalidCommand);
+                    }
+                    let card = manager.add_to_hand(super::selected_precast_card(
+                        add.target_uid,
+                        hero_id,
+                        add.skill_id,
+                    ));
+                    manager.track_temporary(hand_index);
+                    card
+                }
                 TemporaryCardKind::ConfiguredSkill
                 | TemporaryCardKind::ConfiguredSkill3
                 | TemporaryCardKind::HeroSkill => manager.add_temp_card_for(
@@ -790,8 +809,10 @@ pub(super) fn execute(
                     add.team_type,
                 ),
             };
-            if add.kind == TemporaryCardKind::HeroSkill
-                && matches!(add.origin.key.opcode, 739 | 60032)
+            if matches!(
+                add.kind,
+                TemporaryCardKind::HeroSkill | TemporaryCardKind::CatalystMasterSkill
+            ) && matches!(add.origin.key.opcode, 739 | 60032)
             {
                 manager.mark_hero_precast(hand_index);
             }
@@ -808,6 +829,7 @@ pub(super) fn execute(
                     TemporaryCardKind::ConfiguredSkill => CardChangeKind::TemporaryAdded,
                     TemporaryCardKind::ConfiguredSkill3 => CardChangeKind::ConfiguredSkill3Added,
                     TemporaryCardKind::HeroSkill => CardChangeKind::HeroTemporaryAdded,
+                    TemporaryCardKind::CatalystMasterSkill => CardChangeKind::CatalystMasterAdded,
                     TemporaryCardKind::SupportSkill => CardChangeKind::HeroTemporaryAdded,
                 },
                 Some(card),

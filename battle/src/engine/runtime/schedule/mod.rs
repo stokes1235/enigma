@@ -166,6 +166,25 @@ pub fn run_round_end_settlement(
         &mut result,
         drain::run_buff_act_ops(managers, pool, catalog, determinism, context, ops)?,
     );
+    let snapshot = managers
+        .buff
+        .duration_targets(effect_time::ROUND_END_ENTITY_SETTLEMENT, owner_uids)
+        .into_iter()
+        .map(|target| (target.owner_uid, target.buff_uid))
+        .collect::<Vec<_>>();
+    let fading = crate::rouge::fade_before_duration(
+        managers,
+        effect_time::ROUND_END_ENTITY_SETTLEMENT,
+        &snapshot,
+    );
+    let snapshot_uids =
+        (!fading.is_empty()).then(|| snapshot.iter().map(|(_, uid)| *uid).collect());
+    if !fading.is_empty() {
+        append_round_phase(
+            &mut result,
+            drain::run(managers, pool, catalog, determinism, context, fading)?,
+        );
+    }
     let duration = drain::run(
         managers,
         pool,
@@ -177,7 +196,7 @@ pub fn run_round_end_settlement(
                 BuffDurationAdvance::new(
                     effect_time::ROUND_END_ENTITY_SETTLEMENT,
                     owner_uids.to_vec(),
-                    None,
+                    snapshot_uids,
                 )
                 .expect("round-end settlement effect time is registered"),
             ),

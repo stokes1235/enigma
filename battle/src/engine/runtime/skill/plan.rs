@@ -28,6 +28,7 @@ pub(in crate::engine::runtime) struct SkillExecution {
     pub(super) injured_allies: Vec<i64>,
     pub(super) affected_targets: Vec<i64>,
     pub(super) attacked_targets: Vec<i64>,
+    pub(super) enemy_kill_count: i32,
     triggered_buff_features: Vec<BuffFeatureTriggeredEvent>,
     pub(super) buff_additions: Vec<(i32, i32)>,
     pub(super) team_injury_count_round: i32,
@@ -58,6 +59,7 @@ impl SkillExecution {
         pool: &TargetPool,
         catalog: &SkillEffectCatalog,
         invocation: &SkillInvocation,
+        determinism: &mut RoundDeterminism,
     ) {
         if !pool.source_is_attacker(invocation.plan.source_uid) {
             return;
@@ -94,6 +96,13 @@ impl SkillExecution {
         self.modifiers
             .attack_attributes
             .extend(crate::rouge::attack_attributes(managers, &context));
+        self.modifiers
+            .attack_attributes
+            .extend(crate::rouge::fowling_piece_bonus(
+                managers,
+                context.extra_action,
+                determinism,
+            ));
     }
     pub(in crate::engine::runtime) fn inherit_assassination_marks(&mut self, parent: &Self) {
         self.assassination_marks_at_action_start
@@ -158,6 +167,7 @@ impl SkillExecution {
             injured_allies: Vec::new(),
             affected_targets: Vec::new(),
             attacked_targets: Vec::new(),
+            enemy_kill_count: 0,
             triggered_buff_features: Vec::new(),
             buff_additions: Vec::new(),
             team_injury_count_round: 0,
@@ -193,6 +203,7 @@ impl SkillExecution {
             injured_allies: Vec::new(),
             affected_targets: Vec::new(),
             attacked_targets: Vec::new(),
+            enemy_kill_count: 0,
             triggered_buff_features: Vec::new(),
             buff_additions: Vec::new(),
             team_injury_count_round: 0,
@@ -255,6 +266,10 @@ impl SkillExecution {
 
     pub(in crate::engine::runtime) fn record_kills(&mut self, count: i32) {
         self.context.action_kill_count += count.max(0);
+    }
+
+    pub(in crate::engine::runtime) fn record_enemy_kills(&mut self, count: i32) {
+        self.enemy_kill_count = self.enemy_kill_count.saturating_add(count.max(0));
     }
 
     pub(in crate::engine::runtime) fn record_immediate_source_death(&mut self) {
@@ -821,6 +836,21 @@ pub(super) fn damage_ops(
                 &managers.hp,
             );
         let mut attack_attributes = target_modifiers.attack_attributes.clone();
+        if pool.source_is_attacker(source_uid) {
+            attack_attributes.extend(crate::rouge::target_attack_attributes(
+                managers,
+                source_uid,
+                target_uid,
+                managers.catalog().skill_is_big(skill_id),
+            ));
+        }
+        attack_attributes.extend(crate::rouge::target_defense_attributes(
+            managers,
+            pool,
+            source_uid,
+            target_uid,
+            managers.catalog().skill_is_big(skill_id),
+        ));
         if target_count_damage_bonus != 0 {
             attack_attributes.push((
                 crate::engine::entity::attr::AttrId::DmgBonus,

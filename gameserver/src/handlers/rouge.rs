@@ -790,12 +790,32 @@ pub async fn on_rouge_monster_fix_attr(
     if msg.season != Some(1) {
         return Err(AppError::InvalidRequest);
     }
-    // The engine currently applies no additional enemy HP multiplier.
+    let player_id = ctx.player()?.id;
+    let run = database::db::game::rouge::get_run(ctx.state.db, player_id, 1).await?;
+    let hp_rate = if let Some(run) = run {
+        let start =
+            database::db::game::rouge::get_or_create_start(ctx.state.db, player_id, 1).await?;
+        logic::rouge::difficulty::hp_rate_for_run(config::configs::get(), &start, &run)?.max(0)
+    } else {
+        0
+    };
+    // The client uses 1 + fixHpRate on its own monster HP baseline. Keep the
+    // exact per-mille increment from battle setup; client and server baseline
+    // monster values can still differ for other reasons.
+    let rate = if hp_rate == 0 {
+        "0".to_owned()
+    } else {
+        let decimal = format!("{}.{:03}", hp_rate / 1000, hp_rate % 1000);
+        decimal
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned()
+    };
     ctx.send_reply(
         CmdId::RougeMonsterFixAttrCmd,
         sonettobuf::RougeMonsterFixAttrReply {
             season: msg.season,
-            fix_hp_rate: Some("0".to_owned()),
+            fix_hp_rate: Some(rate),
         },
         0,
         req.up_tag,

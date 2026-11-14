@@ -484,6 +484,13 @@ impl BattleRuntime {
             self.managers.card.ai_queue(),
         );
         self.managers.sync_entities(&mut self.fight);
+        if skill_type == ClothSkillType::Rouge {
+            // Current 3.9 Rouge catalyst replies include both teams' current
+            // resources/HP and the living enemy special-attribute snapshot.
+            // Derive these after the skill's effects, including summons/deaths.
+            round.ex_point_info = self.managers.ex_point_info(&self.fight);
+            round.hero_sp_attributes = self.managers.hero_sp_attributes(&self.fight);
+        }
         round.fight_step = steps;
         self.round = Some(round.clone());
         Some(UseClothSkillReply { round: Some(round) })

@@ -46,6 +46,7 @@ impl CardMechanic {
                 .saturating_add(modifier)
                 .saturating_add(managers.card.hand_limit_bonus())
                 .saturating_add(crate::rouge::hand_limit_bonus(managers))
+                .saturating_add(crate::rouge::old_bag_hand_limit_bonus(managers, pool))
                 .max(0),
         )
         .unwrap_or(usize::MAX)

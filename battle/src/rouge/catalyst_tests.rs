@@ -512,3 +512,197 @@ fn disk_catalyst_also_accounts_for_artefact_buffs_queued_in_the_same_opening() {
         );
     }
 }
+
+#[test]
+fn pendulum_active_projects_real_master_cards_from_both_rank_three_groups() {
+    fn visit<'a>(steps: &'a [FightStep], result: &mut Vec<&'a sonettobuf::ActEffect>) {
+        for step in steps {
+            for effect in &step.act_effect {
+                result.push(effect);
+                if let Some(child) = &effect.fight_step {
+                    visit(std::slice::from_ref(child), result);
+                }
+            }
+        }
+    }
+    let initial = fight(100000);
+    let owner = initial
+        .attacker
+        .as_ref()
+        .unwrap()
+        .entitys
+        .iter()
+        .find(|entity| entity.uid == Some(10))
+        .unwrap();
+    let hero_id = owner.model_id.unwrap();
+    let catalog = BattleCatalog::new(crate::test_support::game_data());
+    let expected: Vec<i32> = [&owner.skill_group1, &owner.skill_group2]
+        .into_iter()
+        .map(|group| {
+            *group
+                .iter()
+                .find(|id| catalog.skill_rank(**id) == 3)
+                .unwrap()
+        })
+        .collect();
+    let frozen = context(4, 1000, 100);
+    let mut first = start(initial.clone(), frozen.clone());
+    let reply = cast(&mut first, 800030002, 10);
+    let mut effects = Vec::new();
+    visit(
+        &reply
+            .round
+            .as_ref()
+            .expect("catalyst reply includes a round")
+            .fight_step,
+        &mut effects,
+    );
+    let cards: Vec<_> = effects
+        .into_iter()
+        .filter(|effect| effect.effect_type == Some(197))
+        .collect();
+    assert_eq!(cards.len(), 2);
+    for (effect, skill_id) in cards.iter().zip(&expected) {
+        let card = effect
+            .card_info
+            .as_ref()
+            .expect("197 must carry the actual card");
+        assert_eq!(effect.target_id, Some(10));
+        assert_eq!(effect.team_type, Some(1));
+        assert_eq!(effect.effect_num.unwrap_or_default(), 0);
+        assert_eq!(effect.config_effect.unwrap_or_default(), 0);
+        assert_eq!(effect.reserve_id.unwrap_or_default(), 0);
+        assert_eq!(
+            (card.uid, card.hero_id, card.skill_id),
+            (Some(10), Some(hero_id), Some(*skill_id))
+        );
+        assert_eq!(card.card_type.unwrap_or_default(), 0);
+        assert_eq!(card.temp_card, Some(true));
+        assert!(first.card_hand().iter().any(|held| held == card));
+    }
+    assert_eq!(first.rouge_resources().unwrap().power, 84);
+    let mut replay = start(initial, frozen);
+    assert_eq!(cast(&mut replay, 800030002, 10), reply);
+    assert_eq!(first.reconnect_state(), replay.reconnect_state());
+}
+
+#[test]
+fn pendulum_generated_normal_card_casts_as_its_owner_and_grants_moxie() {
+    let mut runtime = start(fight(100000), context(4, 1000, 100));
+    let before = runtime
+        .entity_info(10)
+        .unwrap()
+        .ex_point
+        .unwrap_or_default();
+    let reply = cast(&mut runtime, 800030002, 10);
+    fn find_card(steps: &[FightStep]) -> Option<i32> {
+        for step in steps {
+            for effect in &step.act_effect {
+                if effect.effect_type == Some(197) {
+                    return effect.card_info.as_ref().and_then(|card| card.skill_id);
+                }
+                if let Some(child) = &effect.fight_step {
+                    if let Some(id) = find_card(std::slice::from_ref(child)) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    }
+    let skill_id = find_card(&reply.round.unwrap().fight_step).unwrap();
+    let index = runtime
+        .card_hand()
+        .iter()
+        .position(|card| {
+            card.uid == Some(10) && card.skill_id == Some(skill_id) && card.temp_card == Some(true)
+        })
+        .unwrap();
+    let result = runtime
+        .advance_round(BeginRoundRequest {
+            opers: vec![BeginRoundOper {
+                oper_type: Some(2),
+                param1: Some(index as i32 + 1),
+                to_id: Some(-1),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(has_step(&result.fight_step, 10, skill_id, None));
+    let mut sequence = Vec::new();
+    fn walk(steps: &[FightStep], uid: i64, skill: i32, out: &mut Vec<&'static str>) {
+        for step in steps {
+            if step.from_id == Some(uid) && step.act_id == Some(skill) {
+                out.push("skill");
+            }
+            for effect in &step.act_effect {
+                if effect.target_id == Some(uid)
+                    && effect.effect_type == Some(111)
+                    && effect.effect_num == Some(1)
+                {
+                    out.push("moxie");
+                }
+                if let Some(child) = &effect.fight_step {
+                    walk(std::slice::from_ref(child), uid, skill, out);
+                }
+            }
+        }
+    }
+    walk(&result.fight_step, 10, skill_id, &mut sequence);
+    assert!(
+        sequence.iter().position(|x| *x == "moxie").unwrap()
+            < sequence.iter().position(|x| *x == "skill").unwrap()
+    );
+    assert_eq!(runtime.entity_info(10).unwrap().ex_point, Some(before + 1));
+}
+
+#[test]
+fn pendulum_first_active_emits_captured_universal_card() {
+    let mut initial = fight(100000);
+    for enemy in &mut initial.defender.as_mut().unwrap().entitys {
+        enemy.model_id = Some(801320301);
+    }
+    let mut runtime = start(initial, context(4, 1000, 100));
+    let reply = cast(&mut runtime, 800030001, -1);
+    let round = reply.round.as_ref().unwrap();
+    let ids: Vec<_> = round
+        .ex_point_info
+        .iter()
+        .filter_map(|entry| entry.uid)
+        .collect();
+    for uid in [10, 11, 12, 13, -1, -2] {
+        assert!(ids.contains(&uid), "missing combatant {uid}");
+    }
+    let enemy_ids: Vec<_> = round
+        .hero_sp_attributes
+        .iter()
+        .filter_map(|entry| entry.uid)
+        .collect();
+    assert!(enemy_ids.contains(&-1) && enemy_ids.contains(&-2));
+    assert!(!enemy_ids.contains(&10));
+    fn collect<'a>(steps: &'a [FightStep], effects: &mut Vec<&'a sonettobuf::ActEffect>) {
+        for step in steps {
+            for effect in &step.act_effect {
+                effects.push(effect);
+                if let Some(nested) = &effect.fight_step {
+                    collect(std::slice::from_ref(nested), effects);
+                }
+            }
+        }
+    }
+    let mut effects = Vec::new();
+    collect(&reply.round.as_ref().unwrap().fight_step, &mut effects);
+    let universal: Vec<_> = effects
+        .iter()
+        .filter(|effect| effect.effect_type == Some(58))
+        .collect();
+    assert_eq!(universal.len(), 1);
+    assert_eq!(universal[0].target_id.unwrap_or_default(), 0);
+    assert_eq!(universal[0].effect_num, Some(30000001));
+    assert_eq!(universal[0].config_effect, Some(60002));
+    assert_eq!(universal[0].reserve_id.unwrap_or_default(), 0);
+    assert_eq!(universal[0].team_type, Some(1));
+    assert!(universal[0].card_info.is_none());
+    assert_eq!(runtime.rouge_resources().unwrap().power, 95);
+}

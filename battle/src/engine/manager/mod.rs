@@ -390,23 +390,26 @@ impl BattleManagers {
 
     fn attack(&self, uid: i64) -> i32 {
         let attack = crate::engine::entity::attr::AttrId::Attack;
-        let base = self.attribute.base(uid, attack);
+        let base = i128::from(self.attribute.base(uid, attack));
         let active_features = self.buff.active_features(&self.hp);
         let dynamic = active_features
             .iter()
             .filter(|feature| feature.owner_uid == uid)
             .map(|feature| {
-                crate::engine::skill::buff_act::attack_attribute_delta(
+                i128::from(crate::engine::skill::buff_act::attack_attribute_delta(
                     feature, attack, &self.buff, &self.hp,
-                )
+                ))
             })
-            .sum::<i32>();
-        let flat = snapshotted_attribute_delta(&self.buff, &self.hp, uid, attack);
-        let rate = 1000
-            + self.attribute.get(uid, attack)
-            + self.buff.attribute_delta(uid, attack)
+            .sum::<i128>();
+        let flat = i128::from(snapshotted_attribute_delta(&self.buff, &self.hp, uid, attack));
+        let rate = 1000i128
+            + i128::from(self.attribute.get(uid, attack))
+            + i128::from(self.buff.attribute_delta(uid, attack))
             + dynamic;
-        base * rate.max(0) / 1000 + flat
+        // Attribute snapshots can legitimately be large even when the final
+        // value fits in i32. Clamp after scaling instead of overflowing first.
+        (base * rate.max(0) / 1000 + flat).clamp(i128::from(i32::MIN), i128::from(i32::MAX))
+            as i32
     }
 
     pub(crate) fn commit_buff(&mut self, plan: BuffPlan) -> BuffChanges {
@@ -1039,6 +1042,17 @@ impl BattleManagers {
             entity::EntityOperation::ChangeCareer { .. }
         ) {
             self.register_entity(&changes.entity);
+        }
+        if matches!(
+            changes.operation,
+            entity::EntityOperation::SummonCombatant { .. }
+                | entity::EntityOperation::SummonSpecial { .. }
+        ) && let Some(uid) = changes.entity.uid
+            && let Some(registered) = self.entity.snapshot(uid)
+        {
+            // Registration may apply frozen Rouge difficulty. The summon packet
+            // must project that committed entity, not its unscaled template.
+            changes.entity = registered;
         }
         if matches!(changes.operation, entity::EntityOperation::Transform { .. }) {
             self.project_primary_attributes(&mut changes.entity);

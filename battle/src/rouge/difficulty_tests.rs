@@ -172,3 +172,43 @@ fn no_profile_preserves_old_battles_and_ap_afflatus_apply_only_to_enemies() {
     assert_eq!(stronger_afflatus_bonus(&managers, -1), 300);
     assert_eq!(stronger_afflatus_bonus(&managers, 10), 0);
 }
+
+#[test]
+fn health_scaling_matches_opening_and_new_wave_without_reapplying() {
+    let profile = Difficulty {
+        enemy_attributes: vec![(101, 250)],
+        initial_enemy_uids: vec![-1],
+        ..Default::default()
+    };
+    let (mut managers, _) = fixture(Some(profile));
+    register_enemy(&mut managers, -1);
+    assert_eq!((managers.hp.max(-1), managers.hp.current(-1)), (1000, 750));
+    managers.register_entity(&enemy(-2, 100, 2));
+    register_enemy(&mut managers, -2);
+    assert_eq!((managers.hp.max(-2), managers.hp.current(-2)), (1250, 937));
+    assert_eq!(
+        managers.entity.snapshot(-2).unwrap().base_attr.unwrap().hp,
+        Some(1250)
+    );
+    register_enemy(&mut managers, -2);
+    assert_eq!((managers.hp.max(-2), managers.hp.current(-2)), (1250, 937));
+}
+
+#[test]
+fn legacy_profile_and_frozen_progression_round_trip_without_recomputing() {
+    let legacy: Difficulty = serde_json::from_str("{}").unwrap();
+    assert!(legacy.enemy_attributes.is_empty());
+    let profile = Difficulty {
+        enemy_attributes: vec![(101, 250), (102, 50)],
+        initial_enemy_uids: vec![-1],
+        ..Default::default()
+    };
+    let frozen = serde_json::to_string(&profile).unwrap();
+    let restored: Difficulty = serde_json::from_str(&frozen).unwrap();
+    assert_eq!(restored, profile);
+    let (mut managers, _) = fixture(Some(restored));
+    register_enemy(&mut managers, -1);
+    assert_eq!(managers.hp.max(-1), 1000); // opening snapshot is already scaled
+    managers.register_entity(&enemy(-2, 100, 2));
+    assert_eq!(managers.hp.max(-2), 1250);
+}

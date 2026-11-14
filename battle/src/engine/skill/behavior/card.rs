@@ -327,7 +327,7 @@ fn enchant_hand_ops(
     context: BehaviorOpContext<'_>,
     behavior: &ParsedBehavior,
 ) -> Option<Vec<RuleOp>> {
-    let [enchant_id, duration, 3, count] = behavior.args.as_slice() else {
+    let [enchant_id, duration, mode, count] = behavior.args.as_slice() else {
         return None;
     };
     let enchant = EnchantedType::try_from(*enchant_id).ok()?;
@@ -340,27 +340,39 @@ fn enchant_hand_ops(
         .filter(|(_, card)| !card.temp_card.unwrap_or_default())
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let mut indices = Vec::new();
-    for _ in 0..usize::try_from(*count).ok()?.min(candidates.len()) {
-        let hand_index = context
-            .determinism
-            .take_hand_card_choice(
-                context.active_skill_id,
-                behavior.spec.key.opcode,
-                &candidates,
-            )
-            .or_else(|| {
-                context
-                    .determinism
-                    .lua_random_index(candidates.len())
-                    .map(|chosen| candidates[chosen])
-            })?;
-        let selected = candidates
-            .iter()
-            .position(|candidate| *candidate == hand_index)?;
-        candidates.swap_remove(selected);
-        indices.push(hand_index);
-    }
+    let indices = if behavior.args.as_slice() == [10003, -1, 1, 2] {
+        // The Storm rule rewrites the two rightmost incantations. Keep their
+        // hand order for the card-effect packet. As with the existing random
+        // mode, skipping temporary cards is an inference, not capture proof;
+        // enchant conflicts continue through the shared card manager.
+        let start = candidates.len().saturating_sub(2);
+        candidates[start..].to_vec()
+    } else if *mode == 3 {
+        let mut indices = Vec::new();
+        for _ in 0..usize::try_from(*count).ok()?.min(candidates.len()) {
+            let hand_index = context
+                .determinism
+                .take_hand_card_choice(
+                    context.active_skill_id,
+                    behavior.spec.key.opcode,
+                    &candidates,
+                )
+                .or_else(|| {
+                    context
+                        .determinism
+                        .lua_random_index(candidates.len())
+                        .map(|chosen| candidates[chosen])
+                })?;
+            let selected = candidates
+                .iter()
+                .position(|candidate| *candidate == hand_index)?;
+            candidates.swap_remove(selected);
+            indices.push(hand_index);
+        }
+        indices
+    } else {
+        return None;
+    };
     (!indices.is_empty()).then(|| {
         vec![RuleOp::Command(BattleCommand::Card(
             CardCommand::EnchantHand(CardEnchantHand {
@@ -578,11 +590,12 @@ pub(super) fn supports_around_change_rank(behavior: &ParsedBehavior) -> bool {
 }
 
 pub(super) fn supports_enchant_hand(behavior: &ParsedBehavior) -> bool {
-    matches!(
-        behavior.args.as_slice(),
-        [enchant_id, _, 3, count]
-            if EnchantedType::try_from(*enchant_id).is_ok() && *count > 0
-    )
+    behavior.args.as_slice() == [10003, -1, 1, 2]
+        || matches!(
+            behavior.args.as_slice(),
+            [enchant_id, _, 3, count]
+                if EnchantedType::try_from(*enchant_id).is_ok() && *count > 0
+        )
 }
 
 pub(super) fn supports_mark_hand_temporary(behavior: &ParsedBehavior) -> bool {
@@ -635,6 +648,133 @@ pub(super) fn supports_rank_by_effect_tag(behavior: &ParsedBehavior) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storm_enchant_selects_rightmost_eligible_cards_in_hand_order() {
+        use crate::engine::{
+            manager::card::CardManager, packet::card::CardPacket,
+            runtime::determinism::RoundDeterminism,
+        };
+        use sonettobuf::{CardEnchant, CardInfo, Fight, FightEntityInfo, FightTeam};
+
+        crate::test_support::init_config();
+        let fight = Fight {
+            attacker: Some(FightTeam {
+                entitys: vec![FightEntityInfo {
+                    uid: Some(10),
+                    team_type: Some(1),
+                    current_hp: Some(100),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pool = crate::engine::skill::target::TargetPool::from_fight(&fight);
+        let behavior = ParsedBehavior::new(60041, "Enchant", vec![10003, -1, 1, 2]);
+        assert!(supports_enchant_hand(&behavior));
+        // Other mode-1 combinations need separate evidence before being enabled.
+        assert!(!supports_enchant_hand(&ParsedBehavior::new(
+            60041,
+            "Enchant",
+            vec![10003, -1, 1, 1]
+        )));
+        assert!(supports_enchant_hand(&ParsedBehavior::new(
+            60041,
+            "Enchant",
+            vec![10002, -1, 3, 2]
+        )));
+
+        let cases = [
+            (vec![], vec![]),
+            (vec![false], vec![0]),
+            (vec![false, false], vec![0, 1]),
+            (vec![false, false, false, false], vec![2, 3]),
+            // Temporary-card exclusion follows existing mode 3, pending a
+            // capture that covers a temporary rightmost incantation.
+            (vec![false, false, false, true], vec![1, 2]),
+            (vec![true, true], vec![]),
+        ];
+        for (temporary, expected) in cases {
+            let mut hand = temporary
+                .iter()
+                .enumerate()
+                .map(|(index, temp)| CardInfo {
+                    uid: Some(10),
+                    skill_id: Some(100 + index as i32),
+                    temp_card: Some(*temp),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>();
+            if let Some(&index) = expected.last() {
+                // Reapplying Variable uses the shared merge behavior, without
+                // manufacturing a second copy of the same enchantment.
+                hand[index].enchants.push(CardEnchant {
+                    enchant_id: Some(10003),
+                    duration: Some(2),
+                    ..Default::default()
+                });
+            }
+            let mut managers = crate::engine::manager::BattleManagers::seeded(&fight);
+            managers.card = CardManager::new(hand);
+            let mut determinism = RoundDeterminism::default();
+            let mut modifiers = crate::engine::skill::action::SkillModifiers::default();
+            let mut target = crate::engine::skill::target::TargetContext::default();
+            let ops = Handler::emit_ops(
+                BehaviorOpContext {
+                    source_uid: 0,
+                    source_team: 1,
+                    target_uid: 0,
+                    active_skill_id: 8018104,
+                    transfer_count: 1,
+                    event: None,
+                    managers: &managers,
+                    pool: &pool,
+                    determinism: &mut determinism,
+                    modifiers: &mut modifiers,
+                    target: &mut target,
+                },
+                &behavior,
+            );
+            if expected.is_empty() {
+                assert!(ops.is_none());
+            } else {
+                let Some([RuleOp::Command(BattleCommand::Card(CardCommand::EnchantHand(
+                    command,
+                )))]) = ops.as_deref()
+                else {
+                    panic!("expected one card enchant command");
+                };
+                assert_eq!(command.indices, expected);
+                assert_eq!(command.enchant, EnchantedType::Chaos);
+                assert_eq!(command.duration, -1);
+                let changed = managers
+                    .card
+                    .execute_command(CardCommand::EnchantHand(command.clone()))
+                    .unwrap();
+                for (index, card) in managers.card.hand().iter().enumerate() {
+                    assert_eq!(card.enchants.len(), expected.contains(&index) as usize);
+                    if expected.contains(&index) {
+                        assert_eq!(card.enchants[0].enchant_id, Some(10003));
+                        assert_eq!(card.enchants[0].duration, Some(-1));
+                    }
+                }
+                let packet = CardPacket::from_change(changed.operation.unwrap());
+                let positions = expected
+                    .iter()
+                    .map(|index| (index + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join("#");
+                assert_eq!(packet.reserve_str.as_deref(), Some(positions.as_str()));
+                assert_eq!(packet.card_info_list.len(), expected.len());
+            }
+            // A positional choice must not advance the random stream.
+            assert_eq!(
+                determinism.lua_random_index(7),
+                RoundDeterminism::default().lua_random_index(7)
+            );
+        }
+    }
 
     #[test]
     fn special_temporary_card_uses_the_source_model_as_reserve_id() {

@@ -10,6 +10,18 @@ use database::models::game::{
 use sonettobuf::FightGroup;
 use sqlx::SqlitePool;
 
+/// Number of physical placed artefacts in a source's rotated effect area.
+/// Inlaid disks grant tags to their holder but are not separate placed items.
+fn physical_artefacts_in_range(
+    source: &crate::rouge::bag::BagItem,
+    bag: &crate::rouge::bag::RunBag,
+) -> i32 {
+    bag.items
+        .iter()
+        .filter(|other| crate::rouge::artifact_rules::within_range(source, other))
+        .count() as i32
+}
+
 pub async fn build_fight(
     db: &SqlitePool,
     player_id: i64,
@@ -108,6 +120,28 @@ pub async fn build_fight_with_rouge_run(
             &team,
         );
         let mut context = battle::rouge::RougeContext::default();
+        context.final_battle = run.map_type == 2;
+        // Only the two named exploration battle types, not the final boss.
+        context.present_danger = if run.map_type == 2 {
+            false
+        } else {
+            serde_json::from_str::<crate::rouge::map::LayerMap>(&run.graph)
+                .ok()
+                .and_then(|graph| graph.node(run.node_id).map(|node| node.node_type == 2))
+                .unwrap_or(false)
+        };
+        context.danger_or_crisis = if run.map_type == 2 {
+            false
+        } else {
+            serde_json::from_str::<crate::rouge::map::LayerMap>(&run.graph)
+                .ok()
+                .and_then(|graph| {
+                    graph
+                        .node(run.node_id)
+                        .map(|node| matches!(node.node_type, 2 | 3 | 4))
+                })
+                .unwrap_or(false)
+        };
         context.difficulty = crate::rouge::difficulty::runtime_context(&difficulty, &built.fight);
         context.entry = Some(crate::rouge::artifact_rules::entry_context(
             config::configs::get(),
@@ -267,7 +301,76 @@ pub async fn build_fight_with_rouge_run(
                 uid: item.uid,
                 item_id: item.item_id,
                 count2,
+                count4: crate::rouge::artifact_rules::inlay_counters(config::configs::get(), item)
+                    .get("count4")
+                    .copied()
+                    .unwrap_or_default(),
+                extra_action_chance_doublers:
+                    crate::rouge::artifact_rules::telescope_count_covering(item, &bag),
                 only_support_below,
+                support_below_count: if item.item_id == 8330111 {
+                    crate::rouge::artifact_rules::support_below_count(item, &bag)
+                } else {
+                    0
+                },
+                non_resonance_in_range: bag.items.iter().any(|other| {
+                    crate::rouge::artifact_rules::within_range(item, other)
+                        && crate::rouge::artifact_rules::effective_tags(other)
+                            .iter()
+                            .any(|tag| *tag < 100 && *tag != 5)
+                }),
+                non_support_in_range: item.item_id == 8210105
+                    && bag.items.iter().any(|other| {
+                        crate::rouge::artifact_rules::within_range(item, other)
+                            && crate::rouge::artifact_rules::effective_tags(other)
+                                .iter()
+                                .any(|tag| *tag < 100 && *tag != 1)
+                    }),
+                medication_in_range: if item.item_id == 8130018 {
+                    crate::rouge::artifact_rules::count_tag_in_range(item, &bag, 104)
+                } else {
+                    0
+                },
+                syntony_in_range: item.item_id == 8210411
+                    && crate::rouge::artifact_rules::count_tag_in_range(item, &bag, 4) > 0,
+                syntony_in_range_count: if matches!(item.item_id, 8220409 | 8220415 | 8320408) {
+                    crate::rouge::artifact_rules::count_tag_in_range(item, &bag, 4)
+                } else {
+                    0
+                },
+                support_in_range_count: if item.item_id == 8310407 {
+                    crate::rouge::artifact_rules::count_tag_in_range(item, &bag, 1)
+                } else {
+                    0
+                },
+                ritual_in_range_count: if item.item_id == 8320207 {
+                    crate::rouge::artifact_rules::count_tag_in_range(item, &bag, 2)
+                } else {
+                    0
+                },
+                artefacts_in_range_count: if item.item_id == 8330005 {
+                    physical_artefacts_in_range(item, &bag)
+                } else {
+                    0
+                },
+                resonance_artefact_count: if item.item_id == 8320511 {
+                    crate::rouge::artifact_rules::layout_counts(&bag)
+                        .tag_counts
+                        .get(&5)
+                        .copied()
+                        .unwrap_or_default()
+                } else {
+                    0
+                },
+                electric_artefact_count: if item.item_id == 8330816 {
+                    crate::rouge::artifact_rules::layout_counts(&bag)
+                        .tag_counts
+                        .get(&8)
+                        .copied()
+                        .unwrap_or_default()
+                } else {
+                    0
+                },
             });
         }
         fn predicate(

@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type Counters = BTreeMap<i64, BTreeMap<String, i32>>;
 pub const GROWTH_KEY: &str = "growth_pct";
+/// New stacks earned this fight; never mix these with percentage points.
+pub const RITUAL_STACKS_KEY: &str = "ritual_stacks";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -38,6 +40,7 @@ pub struct RejectedGrowth {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MergeResult {
     pub added_growth_pct: BTreeMap<i64, i32>,
+    pub added_ritual_stacks: BTreeMap<i64, i32>,
     pub rejected: Vec<RejectedGrowth>,
 }
 
@@ -46,6 +49,8 @@ pub fn attribute_id(item_id: i32) -> Option<i32> {
         8310405 => Some(205),
         8330418 => Some(206),
         8320310 => Some(214),
+        8310608 => Some(205),
+        8320617 => Some(101),
         _ => None,
     }
 }
@@ -77,7 +82,7 @@ pub fn frozen_sources(bag: &RunBag, actor_uids: &[i64]) -> Vec<GrowthSource> {
         .collect();
     let mut result: Vec<_> = active
         .into_iter()
-        .filter(|item| attribute_id(item.item_id).is_some())
+        .filter(|item| attribute_id(item.item_id).is_some() || item.item_id == 8210209)
         .map(|item| GrowthSource {
             uid: item.uid,
             item_id: item.item_id,
@@ -94,6 +99,14 @@ pub fn frozen_sources(bag: &RunBag, actor_uids: &[i64]) -> Vec<GrowthSource> {
 /// Warehouse displays keep this permanent value; their client adds Disk
 /// enhancement counters itself, while placed displays receive the sum.
 pub fn permanent_count2(item: &BagItem, state: &artifact_rules::MapState) -> i32 {
+    if item.item_id == 8210209 {
+        return state
+            .permanent_ritual_stacks
+            .get(&item.uid)
+            .copied()
+            .unwrap_or_default()
+            .clamp(0, 10);
+    }
     attribute_id(item.item_id)
         .and_then(|attr| state.permanent_rates.get(&item.uid)?.get(&attr).copied())
         .unwrap_or_default()
@@ -107,11 +120,22 @@ pub fn permanent_count2(item: &BagItem, state: &artifact_rules::MapState) -> i32
 pub fn initial_growth(bag: &RunBag, state: &artifact_rules::MapState) -> Counters {
     bag.items
         .iter()
-        .filter(|item| artifact_rules::is_active(item) && attribute_id(item.item_id).is_some())
+        .filter(|item| {
+            artifact_rules::is_active(item)
+                && (attribute_id(item.item_id).is_some() || item.item_id == 8210209)
+        })
         .map(|item| {
             (
                 item.uid,
-                BTreeMap::from([(GROWTH_KEY.to_owned(), permanent_count2(item, state))]),
+                BTreeMap::from([(
+                    if item.item_id == 8210209 {
+                        RITUAL_STACKS_KEY
+                    } else {
+                        GROWTH_KEY
+                    }
+                    .to_owned(),
+                    permanent_count2(item, state),
+                )]),
             )
         })
         .collect()
@@ -129,6 +153,7 @@ fn battle_limit(source: &GrowthSource) -> i32 {
         // The unique item's global count2 grows on each actor's qualifying
         // cast. The once-per-actor guards belong to the battle event hook;
         // this independent bound rejects accidentally unbounded reports.
+        8310608 | 8320617 => 100,
         8320310 => {
             let actors = source
                 .actor_uids
@@ -166,14 +191,63 @@ pub fn merge_battle_growth(
     }
     let source_map: BTreeMap<_, _> = sources.iter().map(|source| (source.uid, source)).collect();
     for (uid, counters) in report {
-        let Some(raw) = counters.get(GROWTH_KEY).copied() else {
+        if !counters.contains_key(GROWTH_KEY) && !counters.contains_key(RITUAL_STACKS_KEY) {
             continue;
-        };
+        }
         let Some(source) = source_map.get(uid).filter(|source| source.uid > 0) else {
             result.rejected.push(RejectedGrowth {
                 uid: *uid,
                 reason: "growth source absent from frozen fight",
             });
+            continue;
+        };
+        if source.item_id == 8210209 {
+            let Some(raw) = counters.get(RITUAL_STACKS_KEY).copied() else {
+                continue;
+            };
+            if raw < 0 {
+                result.rejected.push(RejectedGrowth {
+                    uid: *uid,
+                    reason: "negative new-growth checkpoint",
+                });
+                continue;
+            }
+            let previous = state
+                .battle_growth
+                .get(&battle_id)
+                .and_then(|items| items.get(uid))
+                .copied()
+                .unwrap_or_default()
+                .max(0);
+            let existing = state
+                .permanent_ritual_stacks
+                .get(uid)
+                .copied()
+                .unwrap_or_default()
+                .clamp(0, 10);
+            let limit = 10_i32.saturating_sub(existing).saturating_add(previous);
+            let accepted = raw.min(limit);
+            if raw > limit {
+                result.rejected.push(RejectedGrowth {
+                    uid: *uid,
+                    reason: "ritual stack growth exceeds permanent limit",
+                });
+            }
+            if accepted > previous {
+                let delta = accepted - previous;
+                state
+                    .permanent_ritual_stacks
+                    .insert(*uid, existing.saturating_add(delta).min(10));
+                state
+                    .battle_growth
+                    .entry(battle_id)
+                    .or_default()
+                    .insert(*uid, accepted);
+                result.added_ritual_stacks.insert(*uid, delta);
+            }
+            continue;
+        }
+        let Some(raw) = counters.get(GROWTH_KEY).copied() else {
             continue;
         };
         let Some(attr) = attribute_id(source.item_id) else {
@@ -190,7 +264,30 @@ pub fn merge_battle_growth(
             });
             continue;
         }
-        let limit = battle_limit(source);
+        let previous = state
+            .battle_growth
+            .get(&battle_id)
+            .and_then(|items| items.get(uid))
+            .copied()
+            .unwrap_or_default();
+        let mut limit = battle_limit(source);
+        if matches!(source.item_id, 8310608 | 8320617) {
+            let existing = state
+                .permanent_rates
+                .get(uid)
+                .and_then(|m| m.get(&attr))
+                .copied()
+                .unwrap_or_default()
+                .max(0)
+                / 10;
+            // Previous checkpoints are already part of `existing`.
+            limit = limit.min(
+                100_i32
+                    .saturating_sub(existing)
+                    .max(0)
+                    .saturating_add(previous),
+            );
+        }
         let accepted = raw.min(limit);
         if raw > limit {
             result.rejected.push(RejectedGrowth {
@@ -198,7 +295,11 @@ pub fn merge_battle_growth(
                 reason: "growth report exceeds frozen per-battle limit",
             });
         }
-        let quantum = if source.item_id == 8320310 { 2 } else { 4 };
+        let quantum = match source.item_id {
+            8320310 => 2,
+            8310608 | 8320617 => 1,
+            _ => 4,
+        };
         if accepted % quantum != 0 {
             result.rejected.push(RejectedGrowth {
                 uid: *uid,
@@ -206,12 +307,6 @@ pub fn merge_battle_growth(
             });
             continue;
         }
-        let previous = state
-            .battle_growth
-            .get(&battle_id)
-            .and_then(|items| items.get(uid))
-            .copied()
-            .unwrap_or_default();
         if accepted <= previous {
             continue;
         }
@@ -382,5 +477,71 @@ mod tests {
         assert_eq!(sources[0].syntony_artefact_count, 2);
         assert_eq!(sources[0].rare_artefact_count, 1);
         assert_eq!(sources[0].actor_uids, vec![11, 12]);
+    }
+    #[test]
+    fn coin_growth_uses_unit_quantum_caps_total_and_is_idempotent_by_fight() {
+        for (item_id, attr) in [(8310608, 205), (8320617, 101)] {
+            let mut state = artifact_rules::MapState::default();
+            state
+                .permanent_rates
+                .entry(5)
+                .or_default()
+                .insert(attr, 980);
+            let sources = vec![source(5, item_id, false)];
+            let result = merge_battle_growth(&mut state, 101, &sources, &counters(5, 2));
+            assert_eq!(result.added_growth_pct.get(&5), Some(&2));
+            assert_eq!(state.permanent_rates[&5][&attr], 1000);
+            assert_eq!(state.battle_growth[&101][&5], 2);
+            assert!(
+                merge_battle_growth(&mut state, 101, &sources, &counters(5, 2))
+                    .added_growth_pct
+                    .is_empty()
+            );
+            assert!(
+                merge_battle_growth(&mut state, 102, &sources, &counters(5, 1))
+                    .added_growth_pct
+                    .is_empty()
+            );
+            assert_eq!(state.permanent_rates[&5][&attr], 1000);
+        }
+    }
+    #[test]
+    fn lance_stacks_survive_reload_are_bounded_and_do_not_modify_stats() {
+        let mut state = artifact_rules::MapState::default();
+        state.permanent_ritual_stacks.insert(7, 8);
+        let source = [source(7, 8210209, false)];
+        let report = |n| BTreeMap::from([(7, BTreeMap::from([(RITUAL_STACKS_KEY.to_owned(), n)]))]);
+        let first = merge_battle_growth(&mut state, 100, &source, &report(1));
+        assert_eq!(first.added_ritual_stacks.get(&7), Some(&1));
+        state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(
+            merge_battle_growth(&mut state, 100, &source, &report(1))
+                .added_ritual_stacks
+                .is_empty()
+        );
+        let more = merge_battle_growth(&mut state, 100, &source, &report(5));
+        assert_eq!(more.added_ritual_stacks.get(&7), Some(&1));
+        assert_eq!(state.permanent_ritual_stacks[&7], 10);
+        assert!(!more.rejected.is_empty());
+        assert!(
+            merge_battle_growth(&mut state, 101, &source, &report(1))
+                .added_ritual_stacks
+                .is_empty()
+        );
+        assert!(state.permanent_rates.is_empty());
+        let mut placed = item(7, 8210209);
+        let stored = {
+            let mut x = placed.clone();
+            x.row = -1;
+            x.col = -1;
+            x
+        };
+        assert_eq!(permanent_count2(&stored, &state), 10);
+        assert!(initial_growth(&bag(vec![stored]), &state).is_empty());
+        placed.row = 0;
+        assert_eq!(
+            initial_growth(&bag(vec![placed]), &state)[&7][RITUAL_STACKS_KEY],
+            10
+        );
     }
 }

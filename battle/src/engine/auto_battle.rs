@@ -319,7 +319,14 @@ fn apply_prefix(
                 {
                     return false;
                 }
-                let ap_cost = action_point_cost(card, source_uid, skill_id, managers, catalog);
+                let ap_cost = action_point_cost(
+                    card,
+                    source_uid,
+                    skill_id,
+                    managers,
+                    catalog,
+                    cards.is_hero_precast_hand(card_index),
+                );
                 let play = CardPlay {
                     origin: CARD_PLAY_ORIGIN,
                     hand_index: card_index,
@@ -384,7 +391,14 @@ fn best_candidate(
             if source_uid == 0 && !scene_rouge_card {
                 return None;
             }
-            let normal_ap_cost = action_point_cost(card, source_uid, skill_id, managers, catalog);
+            let normal_ap_cost = action_point_cost(
+                card,
+                source_uid,
+                skill_id,
+                managers,
+                catalog,
+                cards.is_hero_precast_hand(card_index),
+            );
             if normal_ap_cost > normal_ap {
                 return None;
             }
@@ -587,6 +601,35 @@ mod rouge_scene_card_tests {
     use super::*;
 
     #[test]
+    fn pendulum_generated_normal_card_costs_one_action_point() {
+        crate::test_support::init_config();
+        let mut managers = BattleManagers::seeded(&Fight::default());
+        crate::rouge::configure(&mut managers, crate::rouge::RougeContext::default());
+        let catalog = SkillEffectCatalog::default();
+        let mut card = CardInfo {
+            uid: Some(10),
+            skill_id: Some(30030113),
+            card_type: Some(0),
+            temp_card: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            action_point_cost(&card, 10, 30030113, &managers, &catalog, true),
+            1
+        );
+        // Unrelated temporary cards and Skill3 keep the preexisting path.
+        assert_eq!(
+            action_point_cost(&card, 10, 30030113, &managers, &catalog, false),
+            0
+        );
+        card.card_type = Some(sonettobuf::card_info::CardType::Skill3 as i32);
+        assert_eq!(
+            action_point_cost(&card, 10, 30030113, &managers, &catalog, true),
+            0
+        );
+    }
+
+    #[test]
     fn scene_identity_is_accepted_only_for_an_actual_rouge_special_card() {
         let mut card = CardInfo {
             uid: Some(0),
@@ -607,9 +650,15 @@ fn action_point_cost(
     skill_id: i32,
     managers: &BattleManagers,
     catalog: &SkillEffectCatalog,
+    hero_precast_provenance: bool,
 ) -> i32 {
+    let catalyst_master_card = managers.rouge.context().is_some()
+        && hero_precast_provenance
+        && card.uid.unwrap_or_default() != 0
+        && card.card_type.unwrap_or_default() == 0;
     i32::from(
         (!card.temp_card.unwrap_or_default()
+            || catalyst_master_card
             || card.card_type == Some(sonettobuf::card_info::CardType::RougeSp as i32))
             && skill_uses_action_point(
                 &managers.buff.active_features(&managers.hp),

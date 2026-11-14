@@ -113,7 +113,7 @@ impl HpManager {
     pub fn add_shield(&mut self, uid: i64, amount: i32, max: i32) -> ShieldGain {
         let shield = self.shields.entry(uid).or_default();
         let before = *shield;
-        *shield = (before + amount.max(0)).min(max.max(0));
+        *shield = before.saturating_add(amount.max(0)).min(max.max(0));
         ShieldGain {
             target_uid: uid,
             before,
@@ -241,9 +241,16 @@ impl HpManager {
         if state.base_max == 0 {
             state.base_max = state.max;
         }
-        state.max = (state.max + delta).max(0);
-        state.current = if delta >= 0 {
-            (state.current + delta).min(state.max)
+        let previous_max = state.max;
+        state.max = state.max.saturating_add(delta).max(0);
+        state.current = if state.current <= 0 {
+            // Raising a defeated actor's maximum HP is not a revive.
+            0
+        } else if delta >= 0 {
+            // Only apply the increase that actually fits into the maximum;
+            // adding the requested delta would heal lost HP after saturation.
+            let applied = state.max.saturating_sub(previous_max);
+            state.current.saturating_add(applied).min(state.max)
         } else {
             state.current.min(state.max)
         };

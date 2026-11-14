@@ -1089,7 +1089,18 @@ fn project_change(
             .iter()
             .skip(changes.before.len())
             .filter_map(|card| card.skill_id)
-            .map(CardPacket::universal_card)
+            .map(|skill_id| {
+                let mut effect = CardPacket::universal_card(skill_id);
+                if changes
+                    .origin
+                    .is_some_and(|origin| origin.key.opcode == 60002)
+                {
+                    // Captured 3.9 AddUniversalCard response retains its opcode.
+                    effect.config_effect = Some(60002);
+                    effect.reserve_id = Some(0);
+                }
+                effect
+            })
             .collect(),
         BattleChange::Card(changes) if changes.kind == CardChangeKind::RedealtKeepRanks => {
             vec![CardPacket::redeal_keep_ranks(
@@ -1153,6 +1164,21 @@ fn project_change(
                 ));
             }
             effects
+        }
+        BattleChange::Card(changes) if changes.kind == CardChangeKind::CatalystMasterAdded => {
+            let card = changes
+                .added
+                .clone()
+                .expect("catalyst card commits retain their added card");
+            let operation = changes
+                .operation
+                .as_ref()
+                .expect("catalyst card commits retain their operation");
+            let crate::engine::manager::card::CardChange::SpCardAdd { team_type, .. } = operation
+            else {
+                panic!("catalyst card commits use SpCardAdd operations")
+            };
+            vec![CardPacket::catalyst_master_card(card, *team_type)]
         }
         BattleChange::Card(changes) if changes.kind == CardChangeKind::HeroTemporaryAdded => {
             let card = changes

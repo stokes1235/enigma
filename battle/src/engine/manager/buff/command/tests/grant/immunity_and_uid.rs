@@ -540,3 +540,66 @@ fn enhanced_passive_variant_retains_its_state_and_silently_consumes_the_attempt_
     assert!(!manager.has_buff_id(10, 30030207));
     assert_eq!(following.change.added.unwrap().buff.uid, Some(1006));
 }
+
+#[test]
+fn general_immunity_blocks_three_bad_statuses_without_expanding_control_only_carriers() {
+    crate::test_support::init_config();
+    let seeded = |buff_id| {
+        let mut manager = BuffManager::default();
+        manager.seed(&Fight {
+            defender: Some(FightTeam {
+                entitys: vec![FightEntityInfo {
+                    uid: Some(-1),
+                    buffs: vec![BuffInfo {
+                        buff_id: Some(buff_id),
+                        uid: Some(20),
+                        duration: Some(1),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        manager
+    };
+    let attempt = |manager: &mut BuffManager, buff_id| {
+        manager
+            .execute(
+                &HpManager::default(),
+                BuffCommand::Grant(BuffGrant {
+                    origin: CommandOrigin {
+                        domain: RuleDomain::Behavior,
+                        key: DefinitionKey::new(1, "AddBuff"),
+                    },
+                    source_uid: -2,
+                    target_uid: -1,
+                    buff_id,
+                    amount: None,
+                    occurrences: 1,
+                    child_uid_reservations: 0,
+                }),
+            )
+            .unwrap()
+            .change
+            .rejected
+            .is_some()
+    };
+    let mut general = seeded(500212);
+    for bad in [4010, 90152, 7121] {
+        assert!(
+            attempt(&mut general, bad),
+            "general immunity should block {bad}"
+        );
+    }
+    assert!(
+        !attempt(&mut general, 90001),
+        "positive buffs must still apply"
+    );
+    assert!(general.has_buff_id(-1, 500212), "immunity is not consumed");
+    let mut control_only = seeded(5091);
+    assert!(attempt(&mut control_only, 4010));
+    assert!(!attempt(&mut control_only, 90152));
+    assert!(!attempt(&mut control_only, 7121));
+}

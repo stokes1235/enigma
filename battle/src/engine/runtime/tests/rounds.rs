@@ -915,3 +915,91 @@ fn finished_round_does_not_promote_reserves_and_still_projects_the_next_round() 
         })
     }));
 }
+
+#[test]
+fn rouge_team_action_points_are_used_on_the_next_round_once() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        cur_round: Some(1),
+        version: Some(6),
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(10),
+                current_hp: Some(100),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(-1),
+                current_hp: Some(100),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let run = || {
+        let mut rt = runtime(fight.clone());
+        rt.configure_rouge(crate::rouge::RougeContext::default());
+        rt.start_round_with_determinism(
+            crate::engine::runtime::determinism::RoundDeterminism::with_seed(17),
+        )
+        .unwrap();
+        let base = rt.round_state.act_point;
+        crate::rouge::queue_next_round_action_points(&mut rt.managers, 4);
+        let next = rt.advance_round(BeginRoundRequest::default()).unwrap();
+        assert_eq!(rt.round_state.act_point, base + 4);
+        assert_eq!(crate::rouge::pending_action_point_bonus(&rt.managers), 0);
+        let following = rt.advance_round(BeginRoundRequest::default()).unwrap();
+        assert_eq!(rt.round_state.act_point, base);
+        (next, following)
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn fish_glasses_have_persistent_action_point_only_in_danger_or_crisis() {
+    crate::test_support::init_config();
+    for danger in [false, true] {
+        let fight = Fight {
+            cur_round: Some(1),
+            version: Some(6),
+            attacker: Some(FightTeam {
+                entitys: vec![FightEntityInfo {
+                    uid: Some(10),
+                    current_hp: Some(100),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            defender: Some(FightTeam {
+                entitys: vec![FightEntityInfo {
+                    uid: Some(-1),
+                    current_hp: Some(100),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut rt = runtime(fight);
+        rt.configure_rouge(crate::rouge::RougeContext {
+            danger_or_crisis: danger,
+            artefacts: vec![crate::rouge::Artefact {
+                uid: 1,
+                item_id: 8330417,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        rt.start_round_with_determinism(
+            crate::engine::runtime::determinism::RoundDeterminism::with_seed(17),
+        )
+        .unwrap();
+        assert_eq!(rt.round_state.act_point, if danger { 2 } else { 1 });
+        rt.advance_round(BeginRoundRequest::default()).unwrap();
+        assert_eq!(rt.round_state.act_point, if danger { 2 } else { 1 });
+    }
+}

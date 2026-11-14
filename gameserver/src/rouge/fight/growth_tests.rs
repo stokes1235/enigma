@@ -19,6 +19,9 @@ const EVENT: i32 = 101101;
 const NODE: i32 = 10;
 const SCARAB: i32 = 8320310;
 
+#[path = "opening_hand_tests.rs"]
+mod opening_hand_tests;
+
 struct Fixture {
     db: SqlitePool,
     group: FightGroup,
@@ -578,7 +581,9 @@ async fn pendulum_exposes_free_moves_and_does_not_grant_moxie_for_moving() {
     // Match Pendulum's +2 hand size without changing the move rule. This
     // keeps the real seeded hand and every composition identical.
     control_context.artefacts.push(battle::rouge::Artefact {
-        uid: 9999, item_id: 8330306, ..Default::default()
+        uid: 9999,
+        item_id: 8330306,
+        ..Default::default()
     });
     let mut control = start_controlled(control_built, f.actor, 1_000_000);
     assert_eq!(fight.card_info_push().extra_move_act, Some(-1));
@@ -603,15 +608,27 @@ async fn pendulum_exposes_free_moves_and_does_not_grant_moxie_for_moving() {
         .expect("seeded ordinary hand supplies a non-adjacent pair");
     let request = BeginRoundRequest {
         opers: vec![BeginRoundOper {
-            oper_type: Some(1), param1: Some(right as i32 + 1),
-            param2: Some(left as i32 + 2), ..Default::default()
-        }], ..Default::default()
+            oper_type: Some(1),
+            param1: Some(right as i32 + 1),
+            param2: Some(left as i32 + 2),
+            ..Default::default()
+        }],
+        ..Default::default()
     };
     battle::dungeon::begin_round(&mut fight, request.clone()).unwrap();
     battle::dungeon::begin_round(&mut control, request).unwrap();
     assert_eq!(
-        fight.entity_info(f.actor).unwrap().ex_point.unwrap_or_default() + 1,
-        control.entity_info(f.actor).unwrap().ex_point.unwrap_or_default(),
+        fight
+            .entity_info(f.actor)
+            .unwrap()
+            .ex_point
+            .unwrap_or_default()
+            + 1,
+        control
+            .entity_info(f.actor)
+            .unwrap()
+            .ex_point
+            .unwrap_or_default(),
         "identical compositions still grant Moxie; only the normal move adds one more"
     );
 }
@@ -725,4 +742,336 @@ async fn actual_scarab_cast_settles_once_from_frozen_source_and_next_fight_appli
         2,
         "new fight reports only new growth, not its old two-point baseline"
     );
+}
+
+#[tokio::test]
+async fn coin_growth_replays_checkpoint_and_victory_settles_once() {
+    async fn configure(f: &Fixture) -> (i64, i64) {
+        sqlx::query("UPDATE user_rouge_start SET style = 7 WHERE user_id = ? AND season = 1")
+            .bind(USER)
+            .execute(&f.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE user_rouge_run SET coin = 300 WHERE user_id = ? AND season = 1")
+            .bind(USER)
+            .execute(&f.db)
+            .await
+            .unwrap();
+        let mut bag: RunBag = serde_json::from_str(&f.run().await.bag).unwrap();
+        let sword = bag.add(8310608).unwrap().uid;
+        bag.place(sword, -1, -1, 0).unwrap();
+        let stomach = bag.add(8320617).unwrap().uid;
+        bag.place(stomach, -1, -1, 0).unwrap();
+        f.store_bag(&bag).await;
+        (sword, stomach)
+    }
+    let request = |f: &Fixture| sonettobuf::StartDungeonRequest {
+        chapter_id: Some(ROUGE_CHAPTER_ID),
+        episode_id: Some(f.episode),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+    let cast = sonettobuf::UseClothSkillRequest {
+        skill_id: Some(800060002),
+        r#type: Some(2),
+        from_id: Some(0),
+        ..Default::default()
+    };
+    let f = Fixture::new().await;
+    let (sword, stomach) = configure(&f).await;
+    let mut active = ActiveBattle::prepare(&f.db, USER, f.episode, f.battle, request(&f))
+        .await
+        .unwrap();
+    active
+        .activate(&f.db, USER, &Default::default())
+        .await
+        .unwrap();
+    active.use_cloth_skill(cast).unwrap();
+    assert_eq!(active.runtime.rouge_resources().unwrap().spent_coin, 200);
+    assert_eq!(active.runtime.rouge_counters()[&sword]["growth_pct"], 20);
+    assert_eq!(active.runtime.rouge_counters()[&stomach]["growth_pct"], 20);
+    assert_eq!(
+        f.run().await.coin,
+        300,
+        "battle growth is not committed before victory"
+    );
+    battle_db::update_fight_checkpoint(
+        &f.db,
+        USER,
+        active.fight_id.unwrap(),
+        &active.checkpoint_json().unwrap(),
+    )
+    .await
+    .unwrap();
+    let record = battle_db::load_active_fight(&f.db, USER)
+        .await
+        .unwrap()
+        .unwrap();
+    let restored = ActiveBattle::restore(&f.db, USER, record).await.unwrap();
+    assert_eq!(
+        restored.runtime.rouge_resources(),
+        active.runtime.rouge_resources()
+    );
+    assert_eq!(
+        restored.runtime.rouge_counters(),
+        active.runtime.rouge_counters()
+    );
+    let live = active.runtime.reconnect_state().0.attacker.unwrap().entitys;
+    let replayed = restored
+        .runtime
+        .reconnect_state()
+        .0
+        .attacker
+        .unwrap()
+        .entitys;
+    assert_eq!(
+        replayed, live,
+        "replay must reproduce current/max HP exactly once"
+    );
+
+    let f = Fixture::new().await;
+    let (sword, stomach) = configure(&f).await;
+    let built = f.build().await;
+    let fight_id = f.fight_id().await;
+    let mut active = ActiveBattle {
+        fight_id: Some(fight_id),
+        chapter_id: ROUGE_CHAPTER_ID,
+        episode_id: f.episode,
+        battle_id: f.battle,
+        runtime: start_controlled(built, f.actor, 1),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+    active.use_cloth_skill(cast).unwrap();
+    cast_rank_two(&mut active.runtime);
+    assert_eq!(active.runtime.outcome(), battle::BattleOutcome::Victory);
+    settle_active(&f.db, USER, &active).await.unwrap();
+    let settled = f.run().await;
+    let state = flow::details(&settled).artifact_state;
+    assert_eq!(state.permanent_rates[&sword][&205], 200);
+    assert_eq!(state.permanent_rates[&stomach][&101], 200);
+    assert_eq!(state.battle_growth[&fight_id][&sword], 20);
+    assert_eq!(state.battle_growth[&fight_id][&stomach], 20);
+    assert!(settle_active(&f.db, USER, &active).await.is_err());
+    assert_eq!(f.run().await.details, settled.details);
+}
+
+/// Keep the production-built Lance context and hero skill, while isolating
+/// the actual ultimate/kill from unrelated enemy waves and scripted AI.
+fn lance_controlled(mut built: BuiltFight, actor: i64, enemy_hp: i32) -> BuiltFight {
+    built.fight.battle_id = Some(0);
+    let attacker = built.fight.attacker.as_mut().unwrap();
+    assert_eq!(attacker.entitys.len(), 1);
+    let hero = &mut attacker.entitys[0];
+    assert_eq!(hero.uid, Some(actor));
+    assert!(hero.ex_skill.unwrap_or_default() > 0);
+    hero.ex_point = Some(5);
+    hero.ex_point_max = Some(5);
+    hero.attr.as_mut().unwrap().attack = Some(10_000);
+    hero.passive_skill.clear();
+    hero.buffs.clear();
+    built.fight.defender = Some(FightTeam {
+        entitys: vec![FightEntityInfo {
+            uid: Some(-1),
+            team_type: Some(2),
+            level: Some(1),
+            current_hp: Some(enemy_hp),
+            attr: Some(HeroAttribute {
+                hp: Some(enemy_hp),
+                attack: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    built
+}
+
+fn lance_ultimate_request(battle: &battle::Battle, actor: i64) -> BeginRoundRequest {
+    let ultimate = battle.entity_info(actor).unwrap().ex_skill.unwrap();
+    let hand = battle.card_info_push().card_group;
+    let index = hand
+        .iter()
+        .position(|card| card.uid == Some(actor) && card.skill_id == Some(ultimate))
+        .expect("the actual equipped ultimate must be available at five moxie");
+    BeginRoundRequest {
+        opers: vec![BeginRoundOper {
+            oper_type: Some(2),
+            param1: Some(index as i32 + 1),
+            to_id: Some(-1),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn lance_ritual_stacks(battle: &battle::Battle, actor: i64) -> i32 {
+    battle
+        .entity_info(actor)
+        .unwrap()
+        .buffs
+        .iter()
+        .filter(|buff| buff.buff_id == Some(90091))
+        .map(|buff| buff.layer.unwrap_or_default())
+        .sum()
+}
+
+#[tokio::test]
+async fn lance_real_ultimate_growth_replays_settles_once_and_follows_placement() {
+    const LANCE: i32 = 8210209;
+    const STACKS: &str = "ritual_stacks";
+
+    let f = Fixture::new().await;
+    let mut bag: RunBag = serde_json::from_str(&f.run().await.bag).unwrap();
+    bag.remove(f.item).unwrap();
+    let lance = bag.add(LANCE).unwrap().uid;
+    bag.place(lance, -1, -1, 0).unwrap();
+    f.store_bag(&bag).await;
+
+    let built = f.build().await;
+    let frozen = built.rouge.as_ref().unwrap();
+    assert!(
+        frozen
+            .growth_sources
+            .iter()
+            .any(|source| source.uid == lance)
+    );
+    assert_eq!(frozen.permanent_growth[&lance][STACKS], 0);
+
+    // This independent production build is retained to compare the next
+    // fight's actual Lance effect against the same pre-growth layout.
+    let before = f.build().await;
+    let controlled = lance_controlled(built, f.actor, 1);
+    let snapshot = serde_json::from_value(serde_json::json!({
+        "fight": &controlled.fight,
+        "ex_attributes": &controlled.ex_attributes,
+        "sp_attributes": &controlled.sp_attributes,
+        "context": &controlled.rouge,
+    }))
+    .unwrap();
+    let fight_id = f.fight_id().await;
+    let request = sonettobuf::StartDungeonRequest {
+        chapter_id: Some(ROUGE_CHAPTER_ID),
+        episode_id: Some(f.episode),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+    let mut active = ActiveBattle {
+        fight_id: Some(fight_id),
+        chapter_id: ROUGE_CHAPTER_ID,
+        episode_id: f.episode,
+        battle_id: f.battle,
+        seed: 42,
+        start_request: Some(request),
+        rouge_snapshot: Some(snapshot),
+        runtime: battle::Battle::start(
+            battle::catalog::BattleCatalog::new(config::configs::get()),
+            controlled,
+            42,
+        )
+        .unwrap(),
+        fight_group: Some(f.group.clone()),
+        ..Default::default()
+    };
+
+    // The battle's prepared source stays frozen even if the item is moved to
+    // the warehouse before the real card is played and a checkpoint is saved.
+    bag.remove(lance).unwrap();
+    f.store_bag(&bag).await;
+    let ultimate = lance_ultimate_request(&active.runtime, f.actor);
+    active.begin_round(ultimate).unwrap();
+    assert_eq!(active.runtime.outcome(), battle::BattleOutcome::Victory);
+    let summary = active.runtime.rouge_summary().unwrap();
+    assert_eq!((summary.ultimate_casts, summary.enemy_kills), (1, 1));
+    assert_eq!(active.runtime.rouge_counters()[&lance][STACKS], 1);
+
+    battle_db::update_fight_checkpoint(&f.db, USER, fight_id, &active.checkpoint_json().unwrap())
+        .await
+        .unwrap();
+    let record = battle_db::load_active_fight(&f.db, USER)
+        .await
+        .unwrap()
+        .unwrap();
+    let restored = ActiveBattle::restore(&f.db, USER, record).await.unwrap();
+    assert_eq!(restored.runtime.outcome(), battle::BattleOutcome::Victory);
+    assert_eq!(
+        restored.runtime.rouge_counters(),
+        active.runtime.rouge_counters()
+    );
+    assert_eq!(
+        restored.runtime.rouge_summary(),
+        active.runtime.rouge_summary()
+    );
+    assert_eq!(
+        restored.runtime.reconnect_state(),
+        active.runtime.reconnect_state()
+    );
+
+    let settlement = settle_active(&f.db, USER, &restored).await.unwrap();
+    assert_eq!(settlement.result.is_win, Some(true));
+    let settled = f.run().await;
+    let state = flow::details(&settled).artifact_state;
+    assert_eq!(state.permanent_ritual_stacks[&lance], 1);
+    assert_eq!(state.battle_growth[&fight_id][&lance], 1);
+    assert!(settle_active(&f.db, USER, &restored).await.is_err());
+    let duplicate = f.run().await;
+    assert_eq!(duplicate.details, settled.details);
+    assert_eq!(duplicate.bag, settled.bag);
+    assert_eq!(
+        (duplicate.coin, duplicate.team_exp),
+        (settled.coin, settled.team_exp)
+    );
+
+    let warehouse = f.build().await;
+    let warehouse_context = warehouse.rouge.as_ref().unwrap();
+    assert!(
+        !warehouse_context
+            .growth_sources
+            .iter()
+            .any(|source| source.uid == lance)
+    );
+    assert!(!warehouse_context.permanent_growth.contains_key(&lance));
+
+    bag.place(lance, -1, -1, 0).unwrap();
+    f.store_bag(&bag).await;
+    let placed = f.build().await;
+    let placed_context = placed.rouge.as_ref().unwrap();
+    assert!(
+        placed_context
+            .growth_sources
+            .iter()
+            .any(|source| source.uid == lance)
+    );
+    assert_eq!(placed_context.permanent_growth[&lance][STACKS], 1);
+
+    // Force only the random activation to succeed in the two controlled
+    // fights; growth itself came from the actual lethal ultimate above.
+    let run_nonlethal = |mut built: BuiltFight| {
+        let item = built
+            .rouge
+            .as_mut()
+            .unwrap()
+            .artefacts
+            .iter_mut()
+            .find(|item| item.uid == lance)
+            .unwrap();
+        item.count4 = 50;
+        let mut battle = battle::Battle::start(
+            battle::catalog::BattleCatalog::new(config::configs::get()),
+            lance_controlled(built, f.actor, 1_000_000),
+            42,
+        )
+        .unwrap();
+        let request = lance_ultimate_request(&battle, f.actor);
+        battle::dungeon::begin_round(&mut battle, request).unwrap();
+        assert_eq!(battle.rouge_summary().unwrap().ultimate_casts, 1);
+        assert_eq!(battle.outcome(), battle::BattleOutcome::Unfinished);
+        assert!(!battle.rouge_counters().contains_key(&lance));
+        lance_ritual_stacks(&battle, f.actor)
+    };
+    let old_stacks = run_nonlethal(before);
+    let new_stacks = run_nonlethal(placed);
+    assert_eq!(old_stacks, 2);
+    assert_eq!(new_stacks, 3, "the earned stack applies exactly once");
 }

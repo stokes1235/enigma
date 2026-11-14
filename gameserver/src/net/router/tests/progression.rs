@@ -36,7 +36,7 @@ async fn exercise_rouge_flow_wire() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE user_rouge_start SET state = 4, difficulty = 1, style = 1 WHERE user_id = ? AND season = 1")
+    sqlx::query("UPDATE user_rouge_start SET state = 4, difficulty = 7, style = 1 WHERE user_id = ? AND season = 1")
                 .bind(player_id).execute(&pool).await.unwrap();
     let mut bag = logic::rouge::bag::RunBag::from_layout("8#8", "").unwrap();
     let a = bag.add(8150014).unwrap();
@@ -46,7 +46,7 @@ async fn exercise_rouge_flow_wire() {
         stages: 0,
         nodes: vec![],
     };
-    sqlx::query("INSERT INTO user_rouge_run (user_id, season, layer_id, map_type, middle_layer_id, position_index, seed, graph, bag, team_exp, updated_at) VALUES (?, 1, 111, 2, 111, 1, 42, ?, ?, 20, 0)")
+    sqlx::query("INSERT INTO user_rouge_run (user_id, season, layer_id, map_type, middle_layer_id, position_index, seed, graph, bag, team_exp, step_count, updated_at) VALUES (?, 1, 111, 2, 111, 1, 42, ?, ?, 20, 10, 0)")
                 .bind(player_id).bind(serde_json::to_string(&graph).unwrap()).bind(serde_json::to_string(&bag).unwrap())
                 .execute(&pool).await.unwrap();
     let state = Box::leak(Box::new(AppState::new(pool, configs::get())));
@@ -149,13 +149,62 @@ async fn exercise_rouge_flow_wire() {
         }
         let body = reply.expect("request must receive a reply");
         match cmd {
-            CmdId::RougeMonsterFixAttrCmd => assert_eq!(
-                sonettobuf::RougeMonsterFixAttrReply::decode(&*body)
+            CmdId::RougeMonsterFixAttrCmd => {
+                let reply = sonettobuf::RougeMonsterFixAttrReply::decode(&*body).unwrap();
+                assert_eq!(reply.fix_hp_rate.as_deref(), Some("0.25"));
+                let start = database::db::game::rouge::get_or_create_start(state.db, player_id, 1)
+                    .await
+                    .unwrap();
+                let run = database::db::game::rouge::get_run(state.db, player_id, 1)
+                    .await
                     .unwrap()
-                    .fix_hp_rate
-                    .as_deref(),
-                Some("0")
-            ),
+                    .unwrap();
+                let profile =
+                    logic::rouge::difficulty::for_run(configs::get(), &start, &run).unwrap();
+                let mut fight = sonettobuf::Fight {
+                    defender: Some(sonettobuf::FightTeam {
+                        entitys: vec![sonettobuf::FightEntityInfo {
+                            uid: Some(-1),
+                            entity_type: Some(2),
+                            model_id: Some(801110301),
+                            current_hp: Some(1000),
+                            attr: Some(sonettobuf::HeroAttribute {
+                                hp: Some(1000),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                logic::rouge::difficulty::apply_to_defenders(
+                    configs::get(),
+                    &mut fight,
+                    &mut vec![],
+                    &mut vec![],
+                    &profile,
+                );
+                assert_eq!(
+                    fight.defender.unwrap().entitys[0].attr.unwrap().hp,
+                    Some(1250)
+                );
+                // The remaining independent command tests retain their original setup.
+                sqlx::query(
+                    "UPDATE user_rouge_start SET difficulty = 1 WHERE user_id = ? AND season = 1",
+                )
+                .bind(player_id)
+                .execute(state.db)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE user_rouge_run SET step_count = 0 WHERE user_id = ? AND season = 1",
+                )
+                .bind(player_id)
+                .execute(state.db)
+                .await
+                .unwrap();
+            }
             CmdId::ActiveTalentCmd => assert_eq!(
                 sonettobuf::ActiveTalentReply::decode(&*body)
                     .unwrap()

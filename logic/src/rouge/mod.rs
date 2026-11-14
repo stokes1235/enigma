@@ -2685,8 +2685,9 @@ struct RunStats {
     steps: i32,
 }
 
-fn current_layer_stats(run: &RougeRun) -> Result<RunStats, AppError> {
-    let layer_map: map::LayerMap = serde_json::from_str(&run.graph)?;
+/// Count the same resolved node set used by settlement without requiring map
+/// metadata. In particular, legacy final-boss snapshots may have an empty map.
+fn current_resolved_nodes(run: &RougeRun) -> HashSet<i32> {
     let mut resolved: HashSet<i32> = serde_json::from_str::<Vec<i32>>(&run.finished)
         .unwrap_or_default()
         .into_iter()
@@ -2697,6 +2698,12 @@ fn current_layer_stats(run: &RougeRun) -> Result<RunStats, AppError> {
             .keys()
             .filter_map(|node_id| node_id.parse::<i32>().ok()),
     );
+    resolved
+}
+
+fn current_layer_stats(run: &RougeRun) -> Result<RunStats, AppError> {
+    let layer_map: map::LayerMap = serde_json::from_str(&run.graph)?;
+    let resolved = current_resolved_nodes(run);
 
     let mut stats = RunStats {
         steps: resolved.len() as i32,

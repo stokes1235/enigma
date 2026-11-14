@@ -5,19 +5,136 @@ use super::{command_prepare::prepare_command, *};
 #[inline(never)]
 fn queued_rouge_followups(ops: Vec<RuleOp>, parent_path: &[usize]) -> Vec<QueuedOp> {
     ops.into_iter()
-        .map(|op| QueuedOp {
-            op,
-            trigger: SkillOpTrigger::Active,
-            skill_execution: None,
-            frame_path: None,
-            parent_path: Some(parent_path.to_vec()),
-            frame_group: None,
-            independent_parent_group: None,
-            frame_owner: Some(FrameOwner::EventRule),
-            subscriber: None,
-            caster_frame: None,
+        .map(|op| {
+            // Direct Ultimates need their own Skill frame so the client sees
+            // the real actor and skill ID, instead of an anonymous effect.
+            let frame_owner = if matches!(&op, RuleOp::Skill(invocation)
+                if invocation.mode == crate::engine::skill::action::SkillExecutionMode::DirectBig)
+            {
+                None
+            } else {
+                Some(FrameOwner::EventRule)
+            };
+            QueuedOp {
+                op,
+                trigger: SkillOpTrigger::Active,
+                skill_execution: None,
+                frame_path: None,
+                parent_path: Some(parent_path.to_vec()),
+                frame_group: None,
+                independent_parent_group: None,
+                frame_owner,
+                subscriber: None,
+                caster_frame: None,
+            }
         })
         .collect()
+}
+
+fn credited_enemy_kill(
+    pool: &TargetPool,
+    source_uid: i64,
+    death: crate::engine::manager::hp::DeathTransition,
+) -> bool {
+    pool.team_type(source_uid) == Some(1)
+        && death.source_uid == source_uid
+        && pool.team_type(death.target_uid) == Some(2)
+}
+
+#[cfg(test)]
+mod rouge_frame_tests {
+    use super::*;
+    use crate::engine::skill::action::{
+        SkillExecutionMode, SkillInvocation, SkillLifecycle, SkillRequest,
+    };
+
+    #[test]
+    fn only_direct_ultimate_gets_its_own_skill_frame() {
+        let normal: SkillInvocation = SkillRequest {
+            source_uid: 10,
+            skill_id: 30030111,
+        }
+        .into();
+        let mut ultimate: SkillInvocation = SkillRequest {
+            source_uid: 10,
+            skill_id: 30030131,
+        }
+        .into();
+        ultimate.mode = SkillExecutionMode::DirectBig;
+        let ops = queued_rouge_followups(
+            vec![
+                RuleOp::Skill(normal),
+                RuleOp::Skill(ultimate),
+                RuleOp::SkillLifecycle(SkillLifecycle::DirectUltimateBodyCompleted {
+                    source_uid: 10,
+                }),
+            ],
+            &[3, 4],
+        );
+        assert_eq!(ops[0].frame_owner, Some(FrameOwner::EventRule));
+        assert_eq!(ops[1].frame_owner, None);
+        assert_eq!(ops[2].frame_owner, Some(FrameOwner::EventRule));
+        assert!(
+            ops.iter()
+                .all(|op| op.parent_path.as_deref() == Some(&[3, 4][..]))
+        );
+    }
+
+    #[test]
+    fn credited_enemy_kill_rejects_wrong_source_and_friendly_deaths() {
+        use crate::engine::manager::hp::DeathTransition;
+        use sonettobuf::{Fight, FightEntityInfo, FightTeam};
+        crate::test_support::init_config();
+        let entity = |uid| FightEntityInfo {
+            uid: Some(uid),
+            current_hp: Some(100),
+            ..Default::default()
+        };
+        let fight = Fight {
+            attacker: Some(FightTeam {
+                entitys: vec![entity(10), entity(11)],
+                ..Default::default()
+            }),
+            defender: Some(FightTeam {
+                entitys: vec![entity(-1), entity(-2)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pool = TargetPool::from_fight(&fight);
+        assert!(credited_enemy_kill(
+            &pool,
+            10,
+            DeathTransition {
+                source_uid: 10,
+                target_uid: -1
+            }
+        ));
+        assert!(!credited_enemy_kill(
+            &pool,
+            10,
+            DeathTransition {
+                source_uid: -2,
+                target_uid: -1
+            }
+        ));
+        assert!(!credited_enemy_kill(
+            &pool,
+            10,
+            DeathTransition {
+                source_uid: 10,
+                target_uid: 11
+            }
+        ));
+        assert!(!credited_enemy_kill(
+            &pool,
+            -2,
+            DeathTransition {
+                source_uid: -2,
+                target_uid: -1
+            }
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -861,9 +978,21 @@ pub(super) fn drain_command(
                 && queued.frame_path.as_ref() == Some(&frame_path)
                 && matches!(queued.op, RuleOp::Skill(_))
         })
-        && let Some(execution) = queued.skill_execution.as_mut()
     {
-        execution.record_kills(death_count as i32);
+        let source_uid = match &queued.op {
+            RuleOp::Skill(invocation) => invocation.plan.source_uid,
+            _ => 0,
+        };
+        let enemy_kills = settled_deaths
+            .iter()
+            .chain(&event_grouped_deaths)
+            .filter(|death| credited_enemy_kill(pool, source_uid, death.transition()))
+            .count()
+            .min(i32::MAX as usize) as i32;
+        if let Some(execution) = queued.skill_execution.as_mut() {
+            execution.record_kills(death_count.min(i32::MAX as usize) as i32);
+            execution.record_enemy_kills(enemy_kills);
+        }
     }
     let cleanup_parent_path = settlement_action_scope
         .map(Vec::as_slice)

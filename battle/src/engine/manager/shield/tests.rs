@@ -30,6 +30,47 @@ fn shield_terms_are_rounded_after_they_are_combined() {
 }
 
 #[test]
+fn ordinary_battle_shields_keep_large_valid_caps_and_saturate_without_overflow() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(1),
+                current_hp: Some(1_000_000_000),
+                attr: Some(HeroAttribute {
+                    hp: Some(1_000_000_000),
+                    attack: Some(1_000_000_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut managers = BattleManagers::seeded(&fight);
+    let large = ShieldCommand {
+        buff_id: 30740121,
+        amount_rate: 1500,
+        multiplier_bonus: None,
+        max_attr: crate::engine::entity::attr::AttrId::Hp,
+        max_rate: 2000,
+        ..command()
+    };
+    execute(&mut managers, large).unwrap();
+    assert_eq!(managers.hp.shield(1), 1_500_000_000);
+    execute(&mut managers, large).unwrap();
+    assert_eq!(managers.hp.shield(1), 2_000_000_000);
+
+    let unbounded = ShieldCommand {
+        max_rate: i32::MAX,
+        ..large
+    };
+    execute(&mut managers, unbounded).unwrap();
+    assert_eq!(managers.hp.shield(1), i32::MAX);
+}
+
+#[test]
 fn origin_attribute_includes_snapshotted_stateful_buff_values() {
     crate::test_support::init_config();
     let fight = Fight {

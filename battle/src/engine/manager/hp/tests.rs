@@ -540,6 +540,15 @@ fn shield_gain_reports_the_added_value_and_keeps_the_total() {
 }
 
 #[test]
+fn shield_addition_saturates_before_applying_the_cap() {
+    let mut hp = HpManager::default();
+    hp.set_shield(10, i32::MAX - 10);
+    let change = hp.add_shield(10, 100, i32::MAX);
+    assert_eq!(change.added, 10);
+    assert_eq!(change.after, i32::MAX);
+}
+
+#[test]
 fn capped_shield_grant_has_no_state_change() {
     let mut hp = HpManager::default();
     hp.states.insert(
@@ -752,4 +761,66 @@ fn revive_and_rekill_invalidates_the_prior_death_transition() {
         .unwrap();
     assert!(!hp.is_current_death(before_register));
     assert!(hp.is_current_death(after_register));
+}
+
+#[test]
+fn max_hp_increase_does_not_revive_a_defeated_unit() {
+    use sonettobuf::{FightTeam, HeroAttribute};
+    let mut manager = HpManager::default();
+    manager.seed(&Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(10),
+                current_hp: Some(0),
+                attr: Some(HeroAttribute {
+                    hp: Some(100),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let after = manager.add_max_snapshot(10, 20);
+    assert_eq!((after.current, after.max), (0, 120));
+}
+
+#[test]
+fn max_hp_increase_saturates_without_healing_lost_hp_or_reviving() {
+    use sonettobuf::{FightTeam, HeroAttribute};
+    let mut manager = HpManager::default();
+    manager.seed(&Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![
+                FightEntityInfo {
+                    uid: Some(10),
+                    current_hp: Some(i32::MAX - 25),
+                    attr: Some(HeroAttribute {
+                        hp: Some(i32::MAX - 5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                FightEntityInfo {
+                    uid: Some(11),
+                    current_hp: Some(0),
+                    attr: Some(HeroAttribute {
+                        hp: Some(i32::MAX - 5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+
+    let alive = manager.add_max_snapshot(10, 50);
+    assert_eq!((alive.current, alive.max), (i32::MAX - 20, i32::MAX));
+    assert_eq!(manager.base_max(10), i32::MAX - 5);
+
+    let defeated = manager.add_max_snapshot(11, 50);
+    assert_eq!((defeated.current, defeated.max), (0, i32::MAX));
 }

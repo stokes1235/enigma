@@ -105,6 +105,12 @@ pub(crate) fn try_change_resources(
     if applied_coin != 0 {
         result.push(marker(190, applied_coin));
     }
+    if applied_coin < 0 {
+        result.extend(super::artefact_coin_growth::spend(
+            managers,
+            applied_coin.saturating_neg(),
+        ));
+    }
     Some(result)
 }
 
@@ -246,6 +252,7 @@ fn own_cards(
     pool: &TargetPool,
     owner: i64,
     rank: i32,
+    master_card: bool,
 ) -> Option<Vec<RuleOp>> {
     let entity = pool.entity(owner)?;
     [&entity.skill_group1, &entity.skill_group2]
@@ -259,10 +266,14 @@ fn own_cards(
                     origin: origin(60032, "AddSkillCard"),
                     target_uid: owner,
                     skill_id: skill,
-                    hero_id: None,
+                    hero_id: master_card.then_some(entity.model_id),
                     reserve_id: i64::from(entity.model_id),
                     team_type: 1,
-                    kind: TemporaryCardKind::HeroSkill,
+                    kind: if master_card {
+                        TemporaryCardKind::CatalystMasterSkill
+                    } else {
+                        TemporaryCardKind::HeroSkill
+                    },
                 }),
             )))
         })
@@ -405,6 +416,7 @@ pub(crate) fn plan(
                 pool,
                 target,
                 if skill_id == 800030002 { 3 } else { 1 },
+                skill_id == 800030002,
             )
         }
         800040002 | 800050002 => {

@@ -62,8 +62,8 @@ pub struct CardManager {
     persisting_temporary: Vec<CardInstanceId>,
     hand_limit_bonus: i32,
     refill_floor: usize,
-    // Narrow server-only provenance for buff act 739. Keep ordinary battle
-    // managers small and never change the Skill3 wire/AP/moxie semantics.
+    // Narrow server-only provenance for buff act 739 and Rouge's captured
+    // catalyst-generated cards. Card-instance identity survives hand moves.
     hero_precast: Option<Box<HeroPrecastProvenance>>,
 }
 
@@ -497,6 +497,14 @@ impl CardManager {
             }
         }
         Some(card)
+    }
+
+    pub(crate) fn is_hero_precast_hand(&self, hand_index: usize) -> bool {
+        self.deck.hand_id(hand_index).is_some_and(|id| {
+            self.hero_precast
+                .as_ref()
+                .is_some_and(|state| state.hand_ids.contains(&id))
+        })
     }
 
     pub(crate) fn is_hero_precast_play(&self, card_index: i32) -> bool {

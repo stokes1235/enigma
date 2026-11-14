@@ -57,6 +57,74 @@ fn special_entity_projection_keeps_source_target_and_spawned_identity_distinct()
 }
 
 #[test]
+fn actual_summon_packets_use_the_registered_rouge_health_and_attack() {
+    use crate::engine::{
+        entity::attr::AttrId, fight::defender::Defender, manager::entity::EntityCommand,
+    };
+    use crate::rouge::{Difficulty, RougeContext};
+
+    crate::test_support::init_config();
+    let source = Defender::build_monster_with_uid(801110301, -1, 1, 2).unwrap();
+    let raw_hp = source.attr.as_ref().unwrap().hp.unwrap();
+    let raw_attack = source.attr.as_ref().unwrap().attack.unwrap();
+    let fight = Fight {
+        defender: Some(FightTeam {
+            entitys: vec![source],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for operation in [
+        EntityOperation::SummonCombatant {
+            model_id: 801110301,
+            position: 2,
+        },
+        EntityOperation::SummonSpecial {
+            model_id: 801110301,
+        },
+    ] {
+        let mut managers = BattleManagers::seeded(&fight);
+        crate::rouge::configure(
+            &mut managers,
+            RougeContext {
+                difficulty: Some(Difficulty {
+                    enemy_attributes: vec![(101, 250), (102, 150)],
+                    initial_enemy_uids: vec![-1],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let changes = managers
+            .execute_entity(EntityCommand {
+                origin: CommandOrigin {
+                    domain: RuleDomain::Behavior,
+                    key: DefinitionKey::new(60056, "SummonSp2"),
+                },
+                source_uid: -1,
+                target_uid: -1,
+                operation,
+            })
+            .unwrap();
+        let uid = changes.entity.uid.unwrap();
+        let effects = project_change_for_test(&BattleChange::Entity(Box::new(changes))).unwrap();
+        let sent = effects[0].entity.as_ref().unwrap();
+        let expected_hp = (i64::from(raw_hp) * 1250 / 1000) as i32;
+        let expected_attack = (i64::from(raw_attack) * 1150 / 1000) as i32;
+        assert_eq!(sent.uid, Some(uid));
+        assert_eq!(sent.attr.as_ref().unwrap().hp, Some(expected_hp));
+        assert_eq!(sent.current_hp, Some(expected_hp));
+        assert_eq!(sent.attr.as_ref().unwrap().attack, Some(expected_attack));
+        assert_eq!(managers.hp.max(uid), expected_hp);
+        assert_eq!(managers.hp.current(uid), expected_hp);
+        assert_eq!(
+            managers.attribute.base(uid, AttrId::Attack),
+            expected_attack
+        );
+    }
+}
+
+#[test]
 fn transformed_entity_projects_the_committed_replacement() {
     let changes = EntityChanges {
         origin: CommandOrigin {

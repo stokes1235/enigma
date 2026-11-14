@@ -239,3 +239,147 @@ fn difficulty_one_is_a_deep_no_op_for_fight_and_extra_attributes() {
     assert_eq!((fight.clone(), ex, sp), before);
     assert!(runtime_context(&profile, &fight).is_none());
 }
+
+#[test]
+fn local_progression_is_bounded_monotonic_and_preserves_zero_step_baseline() {
+    let tables = tables();
+    let mut first = profile(tables, 1, Encounter::MinorObstacle).unwrap();
+    apply_local_progression(&mut first, 0);
+    assert!(first.enemy_attributes.is_empty());
+    let mut midway = profile(tables, 7, Encounter::MinorObstacle).unwrap();
+    apply_local_progression(&mut midway, 10);
+    assert_eq!(midway.enemy_attributes[&101], 250);
+    assert_eq!(midway.enemy_attributes[&102], 200); // 150 confirmed + 50 inferred
+    let mut capped = profile(tables, 20, Encounter::FinalBoss).unwrap();
+    apply_local_progression(&mut capped, i32::MAX);
+    assert_eq!(capped.enemy_attributes[&101], 775);
+    assert_eq!(capped.enemy_attributes[&102], 700);
+    let mut negative = profile(tables, 1, Encounter::MinorObstacle).unwrap();
+    apply_local_progression(&mut negative, i32::MIN);
+    assert!(negative.enemy_attributes.is_empty());
+}
+
+#[test]
+fn inferred_health_scales_current_max_and_base_only_for_defenders() {
+    let tables = tables();
+    let mut fight = Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![enemy(1)],
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![enemy(-1)],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut profile = profile(tables, 7, Encounter::MinorObstacle).unwrap();
+    apply_local_progression(&mut profile, 10);
+    apply_to_defenders(tables, &mut fight, &mut vec![], &mut vec![], &profile);
+    let defender = &fight.defender.as_ref().unwrap().entitys[0];
+    assert_eq!(defender.attr.as_ref().unwrap().hp, Some(1250));
+    assert_eq!(defender.base_attr.as_ref().unwrap().hp, Some(1250));
+    assert_eq!(defender.current_hp, Some(937));
+    assert_eq!(
+        fight.attacker.as_ref().unwrap().entitys[0].current_hp,
+        Some(750)
+    );
+    let context = runtime_context(&profile, &fight).unwrap();
+    assert!(context.enemy_attributes.contains(&(101, 250)));
+    assert_eq!(context.initial_enemy_uids, vec![-1]);
+}
+
+#[test]
+fn saturated_health_scaling_preserves_wounded_fraction() {
+    let mut entity = enemy(-1);
+    entity.attr.as_mut().unwrap().hp = Some(i32::MAX);
+    entity.base_attr.as_mut().unwrap().hp = Some(i32::MAX);
+    entity.current_hp = Some(i32::MAX / 2);
+    let old = entity.attr.as_ref().unwrap().hp;
+    scale(&mut entity.attr.as_mut().unwrap().hp, 775);
+    scale_current_hp(&mut entity, old, 775);
+    assert_eq!(entity.attr.as_ref().unwrap().hp, Some(i32::MAX));
+    assert_eq!(entity.current_hp, Some(i32::MAX / 2));
+}
+
+#[test]
+fn run_progress_uses_archived_and_current_resolved_nodes_once() {
+    let graph = super::super::map::LayerMap {
+        layer_id: 111,
+        stages: 4,
+        nodes: (1..=4)
+            .map(|id| super::super::map::MapNode {
+                stage: id - 1,
+                node_id: id,
+                last: vec![],
+                next: vec![],
+                event_id: id,
+                node_type: 1,
+            })
+            .collect(),
+    };
+    let start = RougeStart {
+        user_id: 1,
+        season: 1,
+        state: 1,
+        difficulty: 7,
+        style: 1,
+        hero_ids: String::new(),
+        assist_hero_uid: 0,
+        point_remainder: 0,
+        genius_remainder: 0,
+        rewards: String::new(),
+    };
+    let mut run = RougeRun {
+        user_id: 1,
+        season: 1,
+        layer_index: 0,
+        layer_id: 111,
+        stage: 3,
+        node_id: 4,
+        seed: 1,
+        graph: serde_json::to_string(&graph).unwrap(),
+        coin: 0,
+        power: 0,
+        updated_at: 0,
+        map_type: 1,
+        middle_layer_id: 0,
+        position_index: 0,
+        choices: r#"{"1":1,"2":1}"#.into(),
+        finished: "[2,3]".into(),
+        bag: String::new(),
+        shop: String::new(),
+        spent_coin: 0,
+        retry_num: 0,
+        terminal_state: 0,
+        minor_count: 0,
+        danger_count: 0,
+        crisis_count: 0,
+        step_count: 7,
+        team: String::new(),
+        power_limit: 0,
+        interactive_index: 0,
+        interactive_refresh: 0,
+        battle_interactive: String::new(),
+        team_exp: 0,
+        middle_state: String::new(),
+        details: String::new(),
+    };
+    let result = for_run(tables(), &start, &run).unwrap();
+    assert_eq!(result.enemy_attributes[&101], 250); // 7 archived + 3 unique nodes
+    assert_eq!(result.enemy_attributes[&102], 200);
+    assert_eq!(hp_rate_for_run(tables(), &start, &run).unwrap(), 250);
+    run.map_type = 2; // final boss retains the current layer's graph
+    let final_boss = for_run(tables(), &start, &run).unwrap();
+    assert_eq!(final_boss.enemy_attributes[&101], 250);
+    run.graph = "{}".into(); // migration 099 default; node accounting survives
+    let legacy_final = for_run(tables(), &start, &run).unwrap();
+    assert_eq!(legacy_final.enemy_attributes, final_boss.enemy_attributes);
+    run.map_type = 1; // ordinary encounters still require their real map node
+    assert!(for_run(tables(), &start, &run).is_err());
+    // The monster preview is still useful before a normal node is selected.
+    assert_eq!(hp_rate_for_run(tables(), &start, &run).unwrap(), 250);
+    let mut unselected = start.clone();
+    unselected.difficulty = 0;
+    assert_eq!(hp_rate_for_run(tables(), &unselected, &run).unwrap(), 0);
+}

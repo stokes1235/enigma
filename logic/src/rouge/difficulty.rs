@@ -6,7 +6,8 @@
 //! template baseline; this rounding/stacking policy is explicit local behavior.
 //! The exported `rouge_layer_difficulty.stepAttr` lacks its server algorithm.
 //! Difficulty1 packet samples also disagree with a direct table multiplier, so
-//! no universal HP/ATK baseline or per-step formula is extrapolated from them.
+//! Its server formula remains unknown. The deliberately bounded local HP and
+//! progression approximation below is not presented as an official formula.
 
 use anyhow::{Result, ensure};
 use database::models::game::rouge::{RougeRun, RougeStart};
@@ -116,7 +117,56 @@ pub fn for_run(tables: &config::GameDB, start: &RougeStart, run: &RougeRun) -> R
             .map(|node| Encounter::from_event_type(node.node_type))
             .ok_or_else(|| anyhow::anyhow!("Rouge difficulty has no current node"))?
     };
-    profile(tables, start.difficulty, encounter)
+    let mut profile = profile(tables, start.difficulty, encounter)?;
+    apply_run_progression(&mut profile, run);
+    Ok(profile)
+}
+
+/// The pre-fight monster panel only needs HP, whose local calculation is
+/// independent of encounter type and does not require a selected map node.
+pub fn hp_rate_for_run(tables: &config::GameDB, start: &RougeStart, run: &RougeRun) -> Result<i32> {
+    ensure!(
+        start.season == 1 && run.season == 1,
+        "invalid Rouge difficulty season"
+    );
+    if start.difficulty == 0 {
+        return Ok(0); // difficulty has not yet been selected
+    }
+    let mut profile = profile(tables, start.difficulty, Encounter::Other)?;
+    apply_run_progression(&mut profile, run);
+    Ok(profile.enemy_attributes.get(&101).copied().unwrap_or(0))
+}
+
+fn apply_run_progression(profile: &mut Profile, run: &RougeRun) {
+    // Final-boss legacy saves can have an empty graph. Step count itself only
+    // needs the same resolved-node union as settlement, not graph metadata.
+    let current_steps = super::current_resolved_nodes(run)
+        .len()
+        .min(i32::MAX as usize) as i32;
+    apply_local_progression(profile, run.step_count.saturating_add(current_steps));
+}
+
+/// Temporary balancing policy, independent of the exported `stepAttr` rows:
+/// HP gains 2.5% per difficulty above 1 plus 1% per resolved node, while ATK
+/// gains 0.5% per node. Cap the counted nodes at 30 and HP growth at 100%.
+/// The run's archived steps and current-layer resolved nodes share the same
+/// accounting as the result screen, and are frozen when the fight is built.
+fn apply_local_progression(profile: &mut Profile, completed_steps: i32) {
+    const MAX_STEPS: i32 = 30;
+    const HP_PER_DIFFICULTY: i32 = 25;
+    const HP_PER_STEP: i32 = 10;
+    const ATTACK_PER_STEP: i32 = 5;
+    const MAX_HP_BONUS: i32 = 1000;
+    let steps = completed_steps.clamp(0, MAX_STEPS);
+    let hp = (profile.difficulty.saturating_sub(1).clamp(0, 19) * HP_PER_DIFFICULTY
+        + steps * HP_PER_STEP)
+        .min(MAX_HP_BONUS);
+    if hp > 0 {
+        *profile.enemy_attributes.entry(101).or_default() += hp;
+    }
+    if steps > 0 {
+        *profile.enemy_attributes.entry(102).or_default() += steps * ATTACK_PER_STEP;
+    }
 }
 
 /// Freeze the profile and the already-scaled enemy UIDs, so reconnect and new
@@ -192,10 +242,27 @@ fn scale(value: &mut Option<i32>, rate: i32) {
     }
 }
 
+fn scale_current_hp(entity: &mut FightEntityInfo, old_max: Option<i32>, rate: i32) {
+    if rate == 0 {
+        return;
+    }
+    match (
+        old_max,
+        entity.attr.as_ref().and_then(|attr| attr.hp),
+        entity.current_hp,
+    ) {
+        (Some(before), Some(after), Some(current)) if before > 0 => {
+            entity.current_hp =
+                Some(((current.clamp(0, before) as i64 * after as i64) / before as i64) as i32);
+        }
+        _ => scale(&mut entity.current_hp, rate),
+    }
+}
+
 /// Apply once to a newly built fight, before freezing it for runtime/reconnect.
 /// Main, reserve and special defender monsters are included. Placeholder team
-/// entities and every attacker remain untouched. HP and current HP are retained
-/// because the baseline/step formula is not established by available evidence.
+/// entities and every attacker remain untouched. HP and current HP both scale,
+/// preserving the health fraction with integer rounding.
 /// Runtime must apply the frozen profile separately to later-wave newcomers.
 pub fn apply_to_defenders(
     tables: &config::GameDB,
@@ -220,14 +287,17 @@ pub fn apply_to_defenders(
         .chain(&mut defender.sp_fight_entities)
         .filter(|entity| entity.entity_type == Some(2) && entity.model_id.unwrap_or(0) > 0)
     {
+        let old_max = entity.attr.as_ref().and_then(|attr| attr.hp);
         for attr in [&mut entity.attr, &mut entity.base_attr]
             .into_iter()
             .flatten()
         {
+            scale(&mut attr.hp, rate(101));
             scale(&mut attr.attack, rate(102));
             scale(&mut attr.defense, rate(103));
             scale(&mut attr.mdefense, rate(104));
         }
+        scale_current_hp(entity, old_max, rate(101));
         let Some(uid) = entity.uid else {
             continue;
         };

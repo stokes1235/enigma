@@ -681,7 +681,14 @@ fn run_player_card_ops(
                 skill: invocation,
                 source: PlayerActionSource::Card,
                 grants_ex_point,
-                grant_after_action: played.card.temp_card.unwrap_or_default(),
+                // Captured 3.9 pendulum cards are temporary normal cards. Their
+                // owner's Moxie is granted immediately before this card's
+                // action; ordinary temporary/precast cards keep their existing
+                // timing. The instance marker survives moves and replay.
+                grant_after_action: played.card.temp_card.unwrap_or_default()
+                    && !(managers.rouge.context().is_some()
+                        && played.card.card_type.unwrap_or_default() == 0
+                        && managers.card.is_hero_precast_play(played.card_index)),
                 composed_owners: Vec::new(),
                 prelude: Vec::new(),
             })

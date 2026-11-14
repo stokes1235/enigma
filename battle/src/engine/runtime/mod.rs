@@ -79,6 +79,15 @@ impl BattleRuntime {
         support_roots.extend(crate::rouge::catalyst::extra_skill_roots(
             context.catalyst.as_ref(),
         ));
+        if context
+            .artefacts
+            .iter()
+            .any(|item| matches!(item.item_id, 8110805 | 8310815))
+        {
+            // Both the electric grenade and the Omega gun invoke this actual
+            // AOE Genesis skill; ensure it is available after reconnect too.
+            support_roots.push(811080592);
+        }
         if let Some(entry) = &context.entry {
             support_roots.extend(crate::rouge::artefact_entry::medication_skill_ids(entry));
         }

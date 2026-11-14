@@ -137,7 +137,10 @@ fn values(run: &RougeRun, bag: Option<&RunBag>, item: &BagItem) -> BTreeMap<i32,
             .max(0);
         *result.entry(1002).or_default() += i64::from(eaten).saturating_mul(3);
     }
-    if matches!(item.item_id, 8310405 | 8330418 | 8320310) {
+    if matches!(
+        item.item_id,
+        8310405 | 8330418 | 8320310 | 8310608 | 8320617 | 8210209
+    ) {
         let permanent = super::artifact_growth::permanent_count2(
             item,
             &super::flow::details(run).artifact_state,
