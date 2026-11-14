@@ -1573,4 +1573,73 @@ mod tests {
             Some(2)
         );
     }
+
+    #[tokio::test]
+    async fn difficulty_six_screenshot_score_with_growth_and_carried_remainder() {
+        // The screenshot establishes the totals, not the exact growth nodes,
+        // earlier remainders or badge telemetry. These synthetic facts exercise
+        // one possible explanation without treating it as captured account data.
+        let (db, manager) = started().await;
+        let expected = rouge::get_run(&db, 1, 1).await.unwrap().unwrap();
+        let mut run = expected.clone();
+        let mut bag: bag::RunBag = serde_json::from_str(&run.bag).unwrap();
+        for _ in 0..65 {
+            bag.add(8130804).unwrap();
+        }
+        run.bag = serde_json::to_string(&bag).unwrap();
+        run.details = serde_json::to_string(&Details {
+            outside_genius: Some(vec![104, 406, 502, 507]),
+            end_id: 103,
+            compositions: BTreeMap::from([(8250015, 3)]),
+            consume_power: 120,
+            achievements: super::super::badges::Progress {
+                disk_uids: (1..=15).collect(),
+                max_action_damage: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        run.middle_state = serde_json::to_string(&MiddleState {
+            pieces: vec![],
+            middle_layer_id: 151,
+            entrust_id: 0,
+            entrust_progress: 0,
+            completed_entrusts: vec![1310233, 1110207, 1210207],
+        })
+        .unwrap();
+        run.spent_coin = 1_000;
+        run.terminal_state = 1;
+        save(&db, &expected, &run).await.unwrap();
+        sqlx::query("UPDATE user_rouge_run SET layer_index = 4, minor_count = 4, danger_count = 9, crisis_count = 2 WHERE user_id = 1 AND season = 1")
+            .execute(&db).await.unwrap();
+        sqlx::query("UPDATE user_rouge_start SET difficulty = 6, point_remainder = 960 WHERE user_id = 1 AND season = 1")
+            .execute(&db).await.unwrap();
+
+        let (info, result) = manager.end(&db, 1).await.unwrap();
+        assert_eq!(result.normal_fight2_score.as_deref(), Some("4#400"));
+        assert_eq!(result.difficult_fight2_score.as_deref(), Some("9#1800"));
+        assert_eq!(result.dangerous_fight2_score.as_deref(), Some("2#600"));
+        assert_eq!(result.collection2_score.as_deref(), Some("66#1320"));
+        assert_eq!(result.layer2_score.as_deref(), Some("5#5000"));
+        assert_eq!(result.entrust2_score.as_deref(), Some("3#480"));
+        assert_eq!(result.end2_score.as_deref(), Some("103#400"));
+        assert_eq!(
+            result.badge2_score.as_deref(),
+            Some("1#150|2#150|3#150|4#150|5#150|6#150|9#150|12#150")
+        );
+        assert_eq!(
+            (result.before_score, result.score_reward, result.final_score),
+            (Some(11_200), Some(170), Some(19_040))
+        );
+        assert_eq!(
+            (result.add_point, result.remain_score2_point),
+            (Some(8), Some(0))
+        );
+        assert_eq!(
+            (result.add_genius_point, result.remain_score2_genius_point),
+            (Some(27), Some(140))
+        );
+        assert_eq!(manager.end(&db, 1).await.unwrap(), (info, result));
+    }
 }

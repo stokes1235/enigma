@@ -42,6 +42,7 @@ mod artefact_opening_hand;
 mod artefact_ritual;
 mod artefact_storm;
 pub(crate) use artefact_storm::prepare as prepare_storm_contracts;
+mod artefact_thorns;
 mod artefact_turns;
 pub mod difficulty;
 pub use difficulty::Difficulty;
@@ -632,8 +633,7 @@ pub(crate) fn opening(managers: &mut BattleManagers, pool: &TargetPool) -> Vec<R
     }
     if rose_and_slough {
         // The configured carrier uses RealHurtFix -500 and is single-instance.
-        // Its separate early settlement of five negative statuses is not yet
-        // implemented: Detonate2 cannot currently resolve all those families.
+        // Early status settlement is handled separately on completed actions.
         for entity in &pool.attacker_main {
             if managers.hp.current(entity.uid) > 0 {
                 ops.push(grant(entity.uid, entity.uid, 833031101));
@@ -782,6 +782,7 @@ pub(crate) fn observe_events(
                     determinism,
                 ));
                 result.extend(catalyst::action(managers, action, aid));
+                result.extend(artefact_thorns::action(managers, pool, action, determinism));
                 if bottle
                     && matches!(action.rank, 2 | 3)
                     && !managers.catalog().skill_is_big(action.skill_id)

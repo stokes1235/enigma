@@ -139,9 +139,21 @@ fn run_opening(
     SkillEffectCatalog,
     RoundDeterminism,
 ) {
+    run_opening_for(8018101, ids)
+}
+
+fn run_opening_for(
+    battle_id: i32,
+    ids: &[i32],
+) -> (
+    BattleManagers,
+    TargetPool,
+    SkillEffectCatalog,
+    RoundDeterminism,
+) {
     crate::test_support::init_config();
     let battle_catalog = BattleCatalog::new(crate::test_support::game_data());
-    let mut fight = fixture(8018101);
+    let mut fight = fixture(battle_id);
     let context = context(ids);
     prepare(battle_catalog, &mut fight, &context);
     let pool = TargetPool::from_fight(&fight);
@@ -172,7 +184,7 @@ fn run_opening(
         &catalog,
         &mut rng,
         TargetContext {
-            battle_id: 8018101,
+            battle_id,
             current_round: 1,
             ..Default::default()
         },
@@ -181,6 +193,16 @@ fn run_opening(
     )
     .unwrap();
     (managers, pool, catalog, rng)
+}
+
+#[test]
+fn captured_storm_battle_applies_the_configured_slow_on_entry() {
+    // Battle16 confirms the base slow, but does not provide an artefact layout.
+    let (managers, _, _, _) = run_opening_for(8018104, &[]);
+    for uid in [10, 11] {
+        assert_eq!(managers.buff.buff_id_amount(uid, 90291), 1);
+    }
+    assert_eq!(managers.buff.buff_id_amount(13, 90291), 0);
 }
 
 #[test]

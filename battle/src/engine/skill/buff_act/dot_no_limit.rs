@@ -22,13 +22,27 @@ pub fn rule_ops(
     let BattleEvent::Hit(hit) = event else {
         return None;
     };
-    let [mode, raw_attr, permille] = subscriber.args.as_slice() else {
+    // Keep the pre-existing unsupported-argument behavior even for a hit
+    // that belongs to another unit.
+    if !matches!(subscriber.args.as_slice(), [_, _, _]) {
         return None;
-    };
+    }
     // "When being attacked": additional damage riding on an attack is not another attack.
     if hit.target_uid != subscriber.owner_uid || hit.damage_from == HurtDamageFromType::Additional {
         return Some(Vec::new());
     }
+    trigger_rule_ops(managers, subscriber)
+}
+
+/// Resolve the same configured wound without inventing an attack event. Used
+/// by Rouge effects that explicitly settle an existing wound after an action.
+pub(crate) fn trigger_rule_ops(
+    managers: &BattleManagers,
+    subscriber: &BuffActSubscriber,
+) -> Option<Vec<super::BuffActRuleOp>> {
+    let [mode, raw_attr, permille] = subscriber.args.as_slice() else {
+        return None;
+    };
     let marker = super::BuffActRuleOp::subscriber_from_applier(RuleOp::BuffFeatureMarker {
         target_uid: subscriber.owner_uid,
         effect_type: EffectType::Dot as i32,
